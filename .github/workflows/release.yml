@@ -1,0 +1,41 @@
+# Release pipeline (GO-PORT §3): every green push to main publishes a
+# GitHub Release with four platform binaries + SHA256SUMS. Collectors
+# self-update from these; a red test = no release = fleet unchanged.
+name: release
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - run: go vet ./... && go test ./...
+      - name: build matrix
+        run: |
+          set -euo pipefail
+          VERSION="v0.1.${{ github.run_number }}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          mkdir -p dist
+          build() {
+            GOOS=$1 GOARCH=$2 GOARM=${3:-} CGO_ENABLED=0 \
+              go build -trimpath -ldflags "-s -w -X main.version=$VERSION" \
+              -o "dist/collector_$4" ./cmd/collector
+          }
+          build darwin arm64 ""  darwin_arm64
+          build linux  arm64 ""  linux_arm64
+          build linux  amd64 ""  linux_amd64
+          build linux  arm   "7" linux_armv7
+          (cd dist && shasum -a 256 collector_* > SHA256SUMS)
+      - name: publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$VERSION" dist/* \
+            --title "$VERSION" \
+            --notes "Automated release from green main (${{ github.sha }})."
