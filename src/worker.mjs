@@ -116,7 +116,11 @@ export function makeWorker({
     let message = await sqs.receive(queues.live, 1);
     let queueUrl = queues.live;
     if (!message) {
-      message = await sqs.receive(queues.bulk, 10);
+      // Bulk wait bounds LIVE latency: a live job enqueued mid-wait sits
+      // until this receive returns. 4s keeps worst-case live pickup ~5s,
+      // inside the server's live window (was 10s - it raced the 8s
+      // timeout and lost, observed live 2026-09-05).
+      message = await sqs.receive(queues.bulk, 4);
       queueUrl = queues.bulk;
     }
     if (!message) return { polled: "empty" };
