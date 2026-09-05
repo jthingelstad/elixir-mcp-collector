@@ -17,6 +17,12 @@ const PATH_BY_ENDPOINT = {
   currentriverrace: (key) => `/clans/${enc(key)}/currentriverrace`,
   riverracelog: (key) => `/clans/${enc(key)}/riverracelog`,
   cards: () => `/cards`, // global catalog; entity_key is the GLOBAL sentinel
+  // Leaderboards (agent feedback #6): entity_key is a location id
+  // ('global' or numeric), top-100 kept bounded.
+  rankings_players: (key) =>
+    `/locations/${enc(key)}/rankings/players?limit=100`,
+  rankings_pol: (key) =>
+    `/locations/${enc(key)}/pathoflegend/players?limit=100`,
 };
 
 export function crPath(job) {
