@@ -12,10 +12,12 @@ card avatar, and a spot on the collector ladder.
 
 You need:
 
-- a machine that stays on (macOS with launchd is the supported path; the
-  worker itself is plain Node and runs anywhere),
-- a **static public IP** (Supercell keys are IP-allowlisted),
-- Node 24+.
+- a machine that stays on (macOS/launchd and Linux/systemd are the
+  paved paths; the worker is plain Node — two pure-JS dependencies, no
+  native modules — and runs anywhere a supervisor can restart it),
+- a **static public IP** (Supercell keys are IP-allowlisted — this is
+  the requirement that actually gates a site, not the hardware),
+- Node 18+ (24+ recommended; 18 is the floor the code and AWS SDK need).
 
 ## 1. Raise your hand
 
@@ -63,6 +65,30 @@ node scripts/install-launchd.mjs
 Running more than one collector on a host (each with its own key and
 gateway_id): put the second instance's config in `.env.gw2` and install
 with `--instance 2` (own label, own log).
+
+### Linux (systemd)
+
+```sh
+sudo cp scripts/elixir-collector.service /etc/systemd/system/
+# edit User= and WorkingDirectory= in the copy, then:
+sudo systemctl enable --now elixir-collector
+```
+
+### Synology DSM / anything else
+
+`scripts/run-forever.sh` is launchd's KeepAlive as a shell loop — run it
+under whatever the host offers:
+
+- **Synology DSM 7**: Control Panel → Task Scheduler → Create →
+  Triggered Task → _Boot-up_, running as your user:
+  `sh /volume1/path/to/elixir-mcp-collector/scripts/run-forever.sh`.
+  Logs land in `collector.log` in the repo root.
+- Node on 32-bit ARM NAS models (armv7, e.g. DS416): Package Center's
+  Node.js if offered for your model, else an
+  [unofficial-builds](https://unofficial-builds.nodejs.org/download/release/)
+  `linux-armv7l` tarball — point the wrapper at it with
+  `NODE_BIN=/path/to/node`. Git comes from Package Center's Git Server
+  package (or Entware).
 
 Check the log for `leased` / `fetched` lines within a couple of minutes.
 

@@ -1,0 +1,24 @@
+# systemd unit template for Linux hosts (the launchd equivalent).
+# Install:
+#   sudo cp scripts/elixir-collector.service /etc/systemd/system/
+#   edit User= and WorkingDirectory= below, then:
+#   sudo systemctl enable --now elixir-collector
+#
+# Restart=always reproduces launchd KeepAlive: the worker exits after a
+# successful self-update and systemd brings it back on the new code.
+
+[Unit]
+Description=Elixir MCP collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=CHANGE_ME
+WorkingDirectory=/CHANGE_ME/elixir-mcp-collector
+ExecStart=/usr/bin/env node src/index.mjs
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
