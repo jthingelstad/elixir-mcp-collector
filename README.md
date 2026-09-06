@@ -103,8 +103,36 @@ curl -fsSL https://raw.githubusercontent.com/jthingelstad/elixir-mcp-collector/m
 Downloads the binary; then supervise it with systemd — edit
 `User=`/`WorkingDirectory=` in `scripts/elixir-collector.service`, copy
 it to `/etc/systemd/system/`, and `sudo systemctl enable --now
-elixir-collector`. On a NAS or anything without systemd,
-`scripts/run-forever.sh` is a plain KeepAlive loop for a boot-up task.
+elixir-collector`.
+
+### NAS and anything without systemd (Synology DSM, BSD, OpenWrt)
+
+`scripts/run-forever.sh` is a plain KeepAlive loop: it runs the
+collector, and restarts it whenever it exits (a crash, a self-update,
+or its progress watchdog firing). Plain POSIX shell, so BusyBox `sh` on
+DSM runs it as-is.
+
+**Put it wherever the collector is.** The script searches its own
+directory, its parent, and the current working directory, and runs the
+first `collector` it finds — so the flat layout the installer produces
+(`collector`, `.env` and `run-forever.sh` all in one folder) works
+exactly as well as a git checkout with the script in `scripts/`. With
+no binary in any of those places it prints what it looked for and
+exits, rather than restart-looping in silence.
+
+On Synology DSM, put the three files in a folder you own (say
+`/volume1/elixir-collector`), then add a **triggered task** in Control
+Panel → Task Scheduler → Create → Triggered Task → User-defined script,
+event **Boot**, running as your own user, with this command:
+
+```sh
+cd /volume1/elixir-collector && sh run-forever.sh
+```
+
+The log lands next to the binary — `/volume1/elixir-collector/collector.log`
+— unless you pass a path of your own as the one argument
+(`sh run-forever.sh /volume1/logs/collector.log`). If that path is not
+writable the script says so and exits immediately.
 
 ### Prefer Python, or an unlisted platform?
 
@@ -117,7 +145,8 @@ python3 python/collector.py     # reads ./.env
 ```
 
 Supervise it with your platform's service manager (launchd, Scheduled
-Task, systemd, or `run-forever.sh`). Building the Go binary yourself is
+Task, systemd, or `run-forever.sh` — with no binary present the loop
+runs `python/collector.py` instead). Building the Go binary yourself is
 `go build -o collector ./cmd/collector` for any target Go supports.
 
 ## 4. Confirm it's working

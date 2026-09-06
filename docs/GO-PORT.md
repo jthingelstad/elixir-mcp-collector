@@ -115,7 +115,9 @@ embedded version string.
 - GitHub availability coupling → update-skip-and-keep-running (§3).
 - armv7 is a first-class Go target; no unofficial anything.
 - DSM has no user systemd → Task Scheduler + run-forever.sh (already
-  shipped, works unchanged with `NODE_BIN` simply unused).
+  shipped, works unchanged with `NODE_BIN` simply unused). [Historical:
+  `NODE_BIN` is gone with the Node worker; run-forever.sh now falls back
+  to the Python twin via `PYTHON_BIN`.]
 
 ## Postscript (2026-09-06): superseded by zero-trust v2
 

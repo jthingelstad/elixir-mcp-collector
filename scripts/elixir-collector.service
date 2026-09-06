@@ -1,8 +1,13 @@
 # systemd unit template for Linux hosts (the launchd equivalent).
 # Install:
 #   sudo cp scripts/elixir-collector.service /etc/systemd/system/
-#   edit User= and WorkingDirectory= below, then:
+#   edit User=, WorkingDirectory= and ExecStart= below, then:
 #   sudo systemctl enable --now elixir-collector
+#
+# WorkingDirectory is the folder holding the collector binary and its
+# .env (what scripts/install.sh drops them into); ExecStart must be the
+# absolute path to that same binary. The collector reads .env from its
+# own directory, or from $ELIXIR_MCP_ENV_FILE if you set one below.
 #
 # Restart=always reproduces launchd KeepAlive: the worker exits after a
 # successful self-update and systemd brings it back on the new code.
@@ -16,7 +21,9 @@ Wants=network-online.target
 Type=simple
 User=CHANGE_ME
 WorkingDirectory=/CHANGE_ME/elixir-mcp-collector
-ExecStart=/usr/bin/env node src/index.mjs
+ExecStart=/CHANGE_ME/elixir-mcp-collector/collector
+# For the Python twin instead of the Go binary, use:
+#   ExecStart=/usr/bin/env python3 /CHANGE_ME/elixir-mcp-collector/python/collector.py
 Restart=always
 RestartSec=2
 

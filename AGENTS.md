@@ -79,7 +79,12 @@ ledger); do not resurrect them.
   binary + supervise via launchd/systemd). `scripts/install.ps1` — the
   Windows equivalent (download .exe + register a Scheduled Task).
   `scripts/elixir-collector.service` (systemd unit),
-  `scripts/run-forever.sh` (generic POSIX KeepAlive loop).
+  `scripts/run-forever.sh` (generic POSIX KeepAlive loop for DSM and
+  other hosts without a supervisor; finds the binary in its own dir,
+  its parent, or `$PWD`, falls back to the Python twin, and exits with
+  a message rather than restart-looping when it finds neither),
+  `scripts/test-run-forever.sh` (its tests; CI runs them under both
+  `sh` and `dash`).
 - `docs/GO-PORT.md` — design history (parts superseded by the zero-trust
   transition; see its postscript).
 

@@ -18,6 +18,15 @@ jobs:
       - run: gofmt -l . | tee /dev/stderr | (! read)
       - run: go vet ./...
       - run: go test ./...
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # dash is Debian's POSIX sh and the closest stand-in for BusyBox
+      # ash on Synology DSM: run the supervisor tests under both.
+      - run: sudo apt-get install -y --no-install-recommends dash
+      - run: sh scripts/test-run-forever.sh
+      - run: SH=dash dash scripts/test-run-forever.sh
   python:
     runs-on: ubuntu-latest
     steps:
