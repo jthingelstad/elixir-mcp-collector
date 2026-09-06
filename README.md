@@ -68,56 +68,68 @@ startup.
 
 ## 3. Run it
 
-**Easiest (Go binary + supervisor), one command:**
+Runs the same on **macOS, Windows, and Linux** — a prebuilt binary
+exists for each (Apple Silicon and Intel Macs; Windows x64 and ARM;
+Linux x64, ARM64, and ARMv7). Pick your platform below; each installer
+downloads the right binary, verifies its SHA-256, and registers a
+service that keeps the collector running and restarts it after a
+self-update. Run the command from the directory holding your `.env`.
+
+### macOS
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/jthingelstad/elixir-mcp-collector/main/scripts/install.sh | sh
 ```
 
-Run it from the directory holding your `.env`. It downloads the right
-prebuilt binary for your platform (verifying its SHA-256), then installs
-a supervised service — launchd on macOS, or prints the systemd steps on
-Linux — that keeps the collector running and restarts it after a
-self-update.
+Installs a launchd agent. Logs: `~/Library/Logs/elixir-mcp-collector.log`.
 
-**Manual Go binary:** download the asset for your platform from the
-[latest release](https://github.com/jthingelstad/elixir-mcp-collector/releases/latest)
-(`collector_darwin_arm64`, `collector_linux_amd64`,
-`collector_linux_arm64`, `collector_linux_armv7`), `chmod +x` it, and
-run it beside your `.env`. Supervise it however your host does:
+### Windows
 
-- **macOS:** `scripts/install.sh` writes a launchd agent.
-- **Linux (systemd):** edit `User=`/`WorkingDirectory=` in
-  `scripts/elixir-collector.service`, copy it to
-  `/etc/systemd/system/`, then `sudo systemctl enable --now
-  elixir-collector`.
-- **Synology DSM / anything else:** `scripts/run-forever.sh` is a plain
-  KeepAlive loop — point a Task Scheduler boot-up task or `nohup` at it.
+In PowerShell:
 
-**Python (no binary):** with Python 3.8+ and your `.env` in the same
-directory:
-
-```sh
-python3 python/collector.py
+```powershell
+irm https://raw.githubusercontent.com/jthingelstad/elixir-mcp-collector/main/scripts/install.ps1 | iex
 ```
 
-Supervise it the same way (systemd, DSM Task Scheduler, or
-`run-forever.sh`).
+Installs a Scheduled Task (built into Windows — nothing else to
+install) that starts at logon and restarts on failure.
+
+### Linux
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jthingelstad/elixir-mcp-collector/main/scripts/install.sh | sh
+```
+
+Downloads the binary; then supervise it with systemd — edit
+`User=`/`WorkingDirectory=` in `scripts/elixir-collector.service`, copy
+it to `/etc/systemd/system/`, and `sudo systemctl enable --now
+elixir-collector`. On a NAS or anything without systemd,
+`scripts/run-forever.sh` is a plain KeepAlive loop for a boot-up task.
+
+### Prefer Python, or an unlisted platform?
+
+The `python/collector.py` twin runs anywhere with **Python 3.8+**
+(standard library only — no `pip install`), identical behavior to the
+Go binary:
+
+```sh
+python3 python/collector.py     # reads ./.env
+```
+
+Supervise it with your platform's service manager (launchd, Scheduled
+Task, systemd, or `run-forever.sh`). Building the Go binary yourself is
+`go build -o collector ./cmd/collector` for any target Go supports.
 
 ## 4. Confirm it's working
 
-Each collector writes JSON log lines to a file (launchd:
-`~/Library/Logs/elixir-mcp-collector.log`; other supervisors: wherever
-you route stdout). Within a few minutes you'll see a startup line, a
-`config` line showing your channel, and then an **activity summary
-every 5 minutes** — jobs done, fetch errors, channel. Warnings cover
-rate-limit backoff and refused leases; if the collector can't reach the
-service for 5 minutes it logs an error and exits so the supervisor
-restarts it clean.
-
-```sh
-tail -f ~/Library/Logs/elixir-mcp-collector.log
-```
+The collector writes JSON log lines to standard output; the installer
+routes them to a file (`~/Library/Logs/elixir-mcp-collector.log` on
+macOS; wherever your supervisor captures stdout on Windows/Linux).
+Within a few minutes you'll see a startup line, a `config` line showing
+your channel, then an **activity summary every 5 minutes** — jobs done,
+fetch errors, channel. Warnings cover rate-limit backoff and refused
+leases; if the collector can't reach the service for 5 minutes it logs
+an error and exits so the supervisor restarts it clean.
 
 Your collector's public status (by card name, heartbeat, and hourly
 fetch rate) also shows on <https://elixir.poapkings.com/data/status>.

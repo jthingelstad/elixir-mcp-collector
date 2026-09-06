@@ -17,12 +17,15 @@ DIR="$(pwd)"
 
 os="$(uname -s)"; arch="$(uname -m)"
 case "$os-$arch" in
-  Darwin-arm64)  asset=collector_darwin_arm64 ;;
-  Darwin-x86_64) asset=collector_darwin_arm64 ;; # Rosetta runs arm64
+  Darwin-arm64)  asset=collector_darwin_arm64 ;;   # Apple Silicon
+  Darwin-x86_64) asset=collector_darwin_amd64 ;;   # Intel Mac
   Linux-aarch64|Linux-arm64) asset=collector_linux_arm64 ;;
   Linux-x86_64)  asset=collector_linux_amd64 ;;
   Linux-armv7l)  asset=collector_linux_armv7 ;;
-  *) echo "No prebuilt binary for $os-$arch. Build from source: go build -o collector ./cmd/collector"; exit 1 ;;
+  *) echo "No prebuilt binary for $os-$arch."
+     echo "On Windows, use scripts/install.ps1 in PowerShell instead."
+     echo "Otherwise build from source: go build -o collector ./cmd/collector"
+     exit 1 ;;
 esac
 
 echo "Downloading $asset (latest release)..."

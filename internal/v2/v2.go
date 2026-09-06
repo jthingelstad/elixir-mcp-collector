@@ -171,6 +171,22 @@ func (c *Client) applyUpdate(url, wantSha string) error {
 	if err != nil {
 		return err
 	}
+	if runtime.GOOS == "windows" {
+		// Windows locks a running .exe: you cannot overwrite it, but you
+		// CAN rename it aside. Move self out of the way, then write the
+		// new binary to the original path; the supervisor restarts into
+		// it. A prior ".old" is cleaned at startup.
+		backup := self + ".old"
+		_ = os.Remove(backup)
+		if err := os.Rename(self, backup); err != nil {
+			return err
+		}
+		if err := os.WriteFile(self, data, 0o755); err != nil {
+			_ = os.Rename(backup, self) // roll back
+			return err
+		}
+		return nil
+	}
 	tmp := filepath.Join(filepath.Dir(self), ".collector-update")
 	if err := os.WriteFile(tmp, data, 0o755); err != nil {
 		return err
@@ -282,6 +298,11 @@ func (c *Client) PollOnce(ctx context.Context) (Outcome, error) {
 func (c *Client) Run(ctx context.Context) error {
 	if err := c.LoadConfig(true); err != nil {
 		return err
+	}
+	if runtime.GOOS == "windows" {
+		if self, err := os.Executable(); err == nil {
+			_ = os.Remove(self + ".old")
+		}
 	}
 	c.lastProgress = c.Now()
 	lastConfig := c.Now()

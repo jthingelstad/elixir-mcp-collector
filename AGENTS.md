@@ -45,7 +45,11 @@ ledger); do not resurrect them.
    push code to operators. Dev builds and the Python client never
    self-update. (The `collector_release` rows the config endpoint serves
    are populated server-side; until they are, released binaries simply
-   don't auto-update — that's safe.)
+   don't auto-update — that's safe.) Cross-platform: release.yml builds
+   macOS (arm64/amd64), Windows (amd64/arm64), and Linux
+   (amd64/arm64/armv7). Windows self-update renames the running .exe
+   aside (can't overwrite a locked binary) and cleans the `.old` at
+   next startup.
 5. **Durability: exit rather than wedge.** Both clients run a progress
    watchdog — 5 minutes with no successful server round-trip and the
    process exits(1) so the supervisor restarts it clean. Any door
@@ -71,9 +75,11 @@ ledger); do not resurrect them.
   (shared helpers).
 - `python/collector.py` — the stdlib-only twin; `python/test_collector.py`
   its tests.
-- `scripts/install.sh` — one-command install (download binary + supervise).
-  `scripts/elixir-collector.service` (systemd), `scripts/run-forever.sh`
-  (generic KeepAlive loop).
+- `scripts/install.sh` — one-command install for macOS/Linux (download
+  binary + supervise via launchd/systemd). `scripts/install.ps1` — the
+  Windows equivalent (download .exe + register a Scheduled Task).
+  `scripts/elixir-collector.service` (systemd unit),
+  `scripts/run-forever.sh` (generic POSIX KeepAlive loop).
 - `docs/GO-PORT.md` — design history (parts superseded by the zero-trust
   transition; see its postscript).
 
