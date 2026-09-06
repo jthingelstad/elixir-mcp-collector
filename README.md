@@ -244,6 +244,12 @@ Released Go binaries self-update, always and automatically. The Python
 script and locally-built binaries cannot, so their operators are
 expected to update them when asked.
 
+**Which release is live.** Every green build publishes a release, so a
+release existing does not mean anyone runs it. Candidates are marked as
+prereleases; the one Elixir MCP has named is promoted to **Latest**.
+That is the release the installers download and the one collectors
+update themselves to, so a fresh install always matches the fleet.
+
 **When it checks.** At startup, then once an hour, as part of the same
 `/config` call it already makes. There is no separate update poll and
 no push: a fleet-wide rollout therefore lands within an hour of the
