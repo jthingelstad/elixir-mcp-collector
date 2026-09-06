@@ -54,6 +54,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Published as a PRERELEASE on purpose. Every green push builds
+          # one, so a build existing says nothing about whether anyone
+          # should run it. Elixir MCP promotes a release to Latest at the
+          # moment it names it as the update authority, and
+          # `releases/latest` is what install.sh and the README hand a new
+          # operator - so a fresh install gets the version the fleet is
+          # actually on, never an unsoaked build.
           gh release create "$VERSION" dist/* \
             --title "$VERSION" \
-            --notes "Automated release from green main (${{ github.sha }})."
+            --prerelease \
+            --notes "Candidate build from green main (${{ github.sha }}).
+
+Not yet named as the update authority: no collector installs this until Elixir MCP names it, at which point this release is promoted to Latest."
