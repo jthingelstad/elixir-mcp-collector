@@ -24,7 +24,10 @@ import urllib.error
 import urllib.request
 
 CR_BASE = "https://api.clashroyale.com/v1"
-VERSION = "py-2.0.0"
+# Stamped with the release tag when published as a release asset;
+# a copy running straight out of a checkout stays "py-dev", which
+# is what the admin version column should say about it.
+VERSION = "py-dev"
 # Watchdog: with no successful door contact for this long, exit so the
 # supervisor restarts clean (a wedged-but-alive process is invisible to
 # launchd KeepAlive; automates the manual kickstart from the 2026-09-06

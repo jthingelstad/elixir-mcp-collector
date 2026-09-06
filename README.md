@@ -181,17 +181,38 @@ keeping one previous generation as `collector.log.1`; set
 
 ### Prefer Python, or an unlisted platform?
 
-The `python/collector.py` twin runs anywhere with **Python 3.8+**
-(standard library only — no `pip install`), identical behavior to the
-Go binary:
+The `collector.py` twin runs anywhere with **Python 3.8+** (standard
+library only — no `pip install`), identical behavior to the Go binary.
+It ships as a release asset with its own SHA-256, so pin and verify it
+the same way you would the binary rather than curling whatever `main`
+happens to be:
 
 ```sh
-python3 python/collector.py     # reads python/.env, beside the script
+mkdir -p ~/elixir-collector && cd ~/elixir-collector
+TAG=$(curl -fsSL https://api.github.com/repos/jthingelstad/elixir-mcp-collector/releases/latest | sed -n 's/.*"tag_name": "\([^"]*\)".*/\1/p')
+base=https://github.com/jthingelstad/elixir-mcp-collector/releases/download/$TAG
+curl -fsSL -o collector.py "$base/collector.py"
+curl -fsSL "$base/SHA256SUMS" | grep ' collector.py$' | shasum -a 256 -c -
+```
+
+Then put your `.env` **beside `collector.py`** (that is where it looks,
+not the directory you run from) and start it:
+
+```sh
+chmod 600 .env
+python3 collector.py
 ```
 
 Supervise it with your platform's service manager (launchd, Scheduled
 Task, systemd, or `run-forever.sh` — with no binary present the loop
-runs `python/collector.py` instead). Building the Go binary yourself is
+runs the Python twin instead).
+
+The Python twin **never self-updates**; that is the point of it. It
+exists so a bad Go release cannot silence a whole fleet, so re-run the
+download above when a new release lands. A copy running straight out of
+a git checkout reports its version as `py-dev`, and a released copy
+reports `py-<tag>`, so you can always tell which one a machine is
+running. Building the Go binary yourself is
 `go build -o collector ./cmd/collector` for any target Go supports.
 
 ## 4. Confirm it's working

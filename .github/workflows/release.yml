@@ -34,7 +34,16 @@ jobs:
           build linux  arm   "7" linux_armv7
           build windows amd64 "" windows_amd64.exe
           build windows arm64 "" windows_arm64.exe
-          (cd dist && shasum -a 256 collector_* > SHA256SUMS)
+          # The Python twin ships as a release artifact too, so an
+          # operator can pin and verify it exactly like the binary
+          # instead of curling whatever main happens to be. Stamp the
+          # release tag into it: an unstamped copy stays "py-dev", which
+          # is how a working-tree run announces itself.
+          sed "s/^VERSION = \"py-dev\"$/VERSION = \"py-$VERSION\"/" \
+            python/collector.py > dist/collector.py
+          grep -q "^VERSION = \"py-$VERSION\"$" dist/collector.py \
+            || { echo "VERSION stamp failed - did the line change?"; exit 1; }
+          (cd dist && shasum -a 256 collector_* collector.py > SHA256SUMS)
       - name: publish release
         env:
           GH_TOKEN: ${{ github.token }}

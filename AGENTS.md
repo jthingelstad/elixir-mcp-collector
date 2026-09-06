@@ -94,7 +94,12 @@ makes "no AWS access" a property of the build rather than a promise.
   `internal/update` (GitHub-polling updater) were DELETED 2026-09-06
   with the transport they served; do not reintroduce either.
 - `python/collector.py` — the stdlib-only twin; `python/test_collector.py`
-  its tests.
+  its tests. It ships as a release asset (`collector.py`) with its own
+  SHA-256 line in SHA256SUMS, so operators pin and verify it like the
+  binary. `release.yml` stamps the tag into `VERSION`; the checked-in
+  value stays `py-dev` so a working-tree run is visibly a dev build in
+  the admin version column. It never self-updates - that is the point
+  of the twin, not a gap to close.
 - `scripts/install.sh` — one-command install for macOS/Linux (download
   binary + supervise via launchd/systemd). `scripts/install.ps1` — the
   Windows equivalent (download .exe + register a Scheduled Task).
