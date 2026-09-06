@@ -23,9 +23,12 @@ import (
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 
+	"net/http"
+
 	"github.com/jthingelstad/elixir-mcp-collector/internal/breaker"
 	"github.com/jthingelstad/elixir-mcp-collector/internal/crapi"
 	"github.com/jthingelstad/elixir-mcp-collector/internal/update"
+	"github.com/jthingelstad/elixir-mcp-collector/internal/v2"
 	"github.com/jthingelstad/elixir-mcp-collector/internal/worker"
 )
 
@@ -114,6 +117,40 @@ func (a sqsAdapter) Delete(ctx context.Context, queueURL, receiptHandle string) 
 func main() {
 	loadEnv()
 	token := required("CR_API_TOKEN")
+
+	// Zero-trust v2 (COLLECTOR-ZERO-TRUST.md): with an Elixir MCP API
+	// token present, this binary is a pure API client - no AWS at all.
+	if apiToken := os.Getenv("ELIXIR_API_TOKEN"); apiToken != "" {
+		base := os.Getenv("ELIXIR_API_BASE")
+		if base == "" {
+			base = "https://elixir.poapkings.com/api/collector"
+		}
+		ctx, cancel := signal.NotifyContext(
+			context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		fetcher := crapi.New(token)
+		client := &v2.Client{
+			Base:    base,
+			Token:   apiToken,
+			Version: version,
+			HTTP:    &http.Client{Timeout: 30 * time.Second},
+			Fetch:   fetcher.Fetch,
+			Log:     logJSON,
+			Now:     time.Now,
+			Sleep: func(d time.Duration) {
+				select {
+				case <-ctx.Done():
+				case <-time.After(d):
+				}
+			},
+		}
+		logJSON("info", "gateway up (go, zero-trust v2) version="+version)
+		if err := client.Run(ctx); err != nil && ctx.Err() == nil {
+			logJSON("error", err.Error())
+			os.Exit(1)
+		}
+		return
+	}
 	gatewayID := required("ELIXIR_MCP_GATEWAY_ID")
 	gatewayName := envOr("ELIXIR_MCP_GATEWAY_NAME", "gw")
 	region := envOr("AWS_REGION", "us-east-1")
