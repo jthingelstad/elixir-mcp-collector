@@ -28,19 +28,51 @@ case "$os-$arch" in
      exit 1 ;;
 esac
 
-echo "Downloading $asset (latest release)..."
-url="https://github.com/$REPO/releases/latest/download/$asset"
-curl -fSL "$url" -o "$DIR/collector"
-chmod +x "$DIR/collector"
+# Resolve the release ONCE and pull both files from that exact tag.
+# Fetching the binary and its checksums from /latest/ separately means a
+# promotion between the two requests hands you a checksum file for a
+# different build.
+tag="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
+  | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+[ -n "$tag" ] || { echo "Could not resolve the latest release of $REPO. Check your network and try again."; exit 1; }
+base="https://github.com/$REPO/releases/download/$tag"
 
-# Verify against the release SHA256SUMS when available (best effort).
-if curl -fsSL "https://github.com/$REPO/releases/latest/download/SHA256SUMS" -o "$DIR/.sums" 2>/dev/null; then
-  want="$(grep " $asset\$" "$DIR/.sums" | awk '{print $1}')"
-  got="$( (shasum -a 256 "$DIR/collector" 2>/dev/null || sha256sum "$DIR/collector") | awk '{print $1}')"
-  rm -f "$DIR/.sums"
-  [ -z "$want" ] || [ "$want" = "$got" ] || { echo "SHA256 mismatch — refusing to install."; exit 1; }
-  echo "SHA256 verified."
+echo "Downloading $asset ($tag)..."
+tmp="$DIR/.collector.$$"
+sums="$DIR/.sums.$$"
+cleanup() { rm -f "$tmp" "$sums"; }
+trap cleanup EXIT INT TERM
+
+# Everything below refuses rather than warns. An unverified collector is
+# not a degraded install, it is an unknown binary, and it must never
+# reach the point of replacing one that is already working.
+curl -fSL "$base/$asset" -o "$tmp" || { echo "Download failed: $base/$asset"; exit 1; }
+curl -fsSL "$base/SHA256SUMS" -o "$sums" || { echo "Could not download SHA256SUMS for $tag - refusing to install unverified."; exit 1; }
+
+want="$(awk -v a="$asset" '$2 == a || $2 == "*" a { print $1 }' "$sums")"
+lines="$(printf '%s\n' "$want" | grep -c '[0-9a-f]' || true)"
+if [ "$lines" -ne 1 ]; then
+  echo "SHA256SUMS for $tag has $lines entries for $asset (expected exactly 1) - refusing to install."
+  exit 1
 fi
+case "$want" in
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+  *) echo "Malformed checksum for $asset in $tag - refusing to install."; exit 1 ;;
+esac
+
+got="$( (shasum -a 256 "$tmp" 2>/dev/null || sha256sum "$tmp") | awk '{print $1}')"
+[ -n "$got" ] || { echo "Could not compute a checksum locally (no shasum or sha256sum) - refusing to install."; exit 1; }
+if [ "$want" != "$got" ]; then
+  echo "SHA256 mismatch for $asset in $tag - refusing to install."
+  echo "  expected $want"
+  echo "  got      $got"
+  exit 1
+fi
+echo "SHA256 verified against $tag."
+
+# Verified: only now replace whatever is already installed.
+chmod +x "$tmp"
+mv -f "$tmp" "$DIR/collector"
 
 if [ "$os" = "Darwin" ]; then
   LABEL="com.poapkings.elixir-mcp-collector"

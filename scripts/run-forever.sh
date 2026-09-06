@@ -86,14 +86,20 @@ fatal() {
 
 stamp() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 
-# Ordered, de-duplicated search roots.
-ROOTS=""
+# Ordered, de-duplicated search roots, held as POSITIONAL PARAMETERS.
+#
+# They used to live in one space-separated string iterated unquoted,
+# which split every path on whitespace: an install under
+# "/volume1/Elixir Collector" searched ".../Elixir" and "Collector"
+# and found nothing (issue #4). No arrays in POSIX sh, so "$@" is the
+# list type. Both positional args were captured above, before this.
+set --
 for d in "$SCRIPT_DIR" "$PARENT_DIR" "$HERE_DIR"; do
   seen=0
-  for r in $ROOTS; do
+  for r in "$@"; do
     [ "$r" = "$d" ] && seen=1
   done
-  [ "$seen" = 0 ] && ROOTS="$ROOTS $d"
+  [ "$seen" = 0 ] && set -- "$@" "$d"
 done
 
 CMD=""
@@ -101,7 +107,7 @@ PY_WORKER=""
 WORKER_DIR=""
 SEARCHED=""
 
-for d in $ROOTS; do
+for d in "$@"; do
   SEARCHED="${SEARCHED:+$SEARCHED, }$d/collector"
   if [ -z "$CMD" ] && [ -f "$d/collector" ] && [ -x "$d/collector" ]; then
     CMD="$d/collector"
@@ -110,7 +116,7 @@ for d in $ROOTS; do
 done
 
 if [ -z "$CMD" ]; then
-  for d in $ROOTS; do
+  for d in "$@"; do
     for rel in python/collector.py collector.py; do
       if [ -z "$PY_WORKER" ] && [ -f "$d/$rel" ]; then
         PY_WORKER="$d/$rel"

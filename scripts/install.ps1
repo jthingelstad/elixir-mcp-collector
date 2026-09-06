@@ -21,18 +21,46 @@ switch ($arch) {
 }
 $exe = "$dir\collector.exe"
 
-Write-Host "Downloading $asset (latest release)..."
-Invoke-WebRequest -Uri "https://github.com/$repo/releases/latest/download/$asset" -OutFile $exe
+# Resolve the release ONCE so the binary and its checksums cannot come
+# from two different builds if Latest moves between the requests.
+# ($ErrorActionPreference is already Stop at the top of this script, so
+# a failed request throws rather than warning and carrying on.)
+$tag = (Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest").tag_name
+if (-not $tag) { throw "Could not resolve the latest release of $repo." }
+$base = "https://github.com/$repo/releases/download/$tag"
 
-# Verify against the release SHA256SUMS (best effort).
+Write-Host "Downloading $asset ($tag)..."
+# Download beside the target, never onto it: a failed or unverified
+# install must leave a working collector exactly where it was.
+$tmp  = "$dir\.collector.$PID.exe"
+$sums = "$dir\.sums.$PID"
 try {
-  Invoke-WebRequest -Uri "https://github.com/$repo/releases/latest/download/SHA256SUMS" -OutFile "$dir\.sums"
-  $want = (Select-String -Path "$dir\.sums" -Pattern " $([regex]::Escape($asset))$").Line.Split(" ")[0]
-  $got  = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLower()
-  Remove-Item "$dir\.sums" -ErrorAction SilentlyContinue
-  if ($want -and ($want -ne $got)) { Write-Error "SHA256 mismatch - refusing to install." }
-  if ($want) { Write-Host "SHA256 verified." }
-} catch { Write-Host "(Could not fetch SHA256SUMS; skipping verification.)" }
+  Invoke-WebRequest -Uri "$base/$asset" -OutFile $tmp
+  try {
+    Invoke-WebRequest -Uri "$base/SHA256SUMS" -OutFile $sums
+  } catch {
+    throw "Could not download SHA256SUMS for $tag - refusing to install unverified."
+  }
+
+  $sumLines = @(Select-String -Path $sums -Pattern "\s\*?$([regex]::Escape($asset))$")
+  if ($sumLines.Count -ne 1) {
+    throw "SHA256SUMS for $tag has $($sumLines.Count) entries for $asset (expected exactly 1) - refusing to install."
+  }
+  $want = $sumLines[0].Line.Split(" ")[0].ToLower()
+  if ($want -notmatch '^[0-9a-f]{64}$') {
+    throw "Malformed checksum for $asset in $tag - refusing to install."
+  }
+  $got = (Get-FileHash -Algorithm SHA256 $tmp).Hash.ToLower()
+  if ($want -ne $got) {
+    throw "SHA256 mismatch for $asset in $tag - refusing to install.`n  expected $want`n  got      $got"
+  }
+  Write-Host "SHA256 verified against $tag."
+
+  # Verified: only now replace whatever is already installed.
+  Move-Item -Force $tmp $exe
+} finally {
+  Remove-Item $tmp, $sums -ErrorAction SilentlyContinue
+}
 
 $taskName = "ElixirMCPCollector"
 $env:ELIXIR_MCP_ENV_FILE = "$dir\.env"

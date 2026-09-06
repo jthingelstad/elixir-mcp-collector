@@ -27,6 +27,8 @@ jobs:
       - run: sudo apt-get install -y --no-install-recommends dash
       - run: sh scripts/test-run-forever.sh
       - run: SH=dash dash scripts/test-run-forever.sh
+      - run: sh scripts/test-install.sh
+      - run: SH=dash sh scripts/test-install.sh
   python:
     runs-on: ubuntu-latest
     steps:

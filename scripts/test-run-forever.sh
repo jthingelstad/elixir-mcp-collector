@@ -310,6 +310,82 @@ else
   no "a non-config exit still restarts" "restarted $runs times"
 fi
 
+# --- 11. paths containing spaces (issue #4) ---
+# ROOTS was one space-separated string iterated unquoted, so every path
+# was split on whitespace and a real install under a folder with a space
+# in it could not find the binary sitting beside the script.
+d="$TMP/Elixir Collector"
+mkdir -p "$d"
+cp "$TARGET" "$d/run-forever.sh"
+fake_binary "$d/collector"
+out="$( (cd "$TMP" && "$SH" "$d/run-forever.sh" --check) 2>&1 )"
+if contains "would run Go collector ($d/collector)" "$out"; then
+  ok "finds a binary beside the script under a path with spaces"
+else
+  no "finds a binary beside the script under a path with spaces" "$out"
+fi
+
+d="$TMP/My Checkout/scripts"
+mkdir -p "$d"
+cp "$TARGET" "$d/run-forever.sh"
+fake_binary "$TMP/My Checkout/collector"
+out="$( (cd "$TMP" && "$SH" "$d/run-forever.sh" --check) 2>&1 )"
+if contains "would run Go collector ($TMP/My Checkout/collector)" "$out"; then
+  ok "finds a binary one level up under a path with spaces"
+else
+  no "finds a binary one level up under a path with spaces" "$out"
+fi
+
+d="$TMP/Python Home"
+mkdir -p "$d/python"
+cp "$TARGET" "$d/run-forever.sh"
+: > "$d/python/collector.py"
+out="$( (cd "$TMP" && "$SH" "$d/run-forever.sh" --check) 2>&1 )"
+if contains "would run Python worker" "$out"; then
+  ok "finds the Python twin under a path with spaces"
+else
+  no "finds the Python twin under a path with spaces" "$out"
+fi
+
+d="$TMP/Working Dir"
+mkdir -p "$d"
+cp "$TARGET" "$TMP/run-forever-cwd.sh"
+fake_binary "$d/collector"
+out="$( (cd "$d" && "$SH" "$TMP/run-forever-cwd.sh" --check) 2>&1 )"
+if contains "would run Go collector ($d/collector)" "$out"; then
+  ok "finds a binary in a working directory with spaces"
+else
+  no "finds a binary in a working directory with spaces" "$out"
+fi
+
+# An explicit logfile argument with spaces must survive too.
+d="$TMP/Log Home"
+mkdir -p "$d/log dir"
+cp "$TARGET" "$d/run-forever.sh"
+fake_binary "$d/collector"
+out="$( (cd "$TMP" && "$SH" "$d/run-forever.sh" --check "$d/log dir/collector run.log") 2>&1 )"
+if contains "log $d/log dir/collector run.log" "$out"; then
+  ok "an explicit logfile containing spaces is used verbatim"
+else
+  no "an explicit logfile containing spaces is used verbatim" "$out"
+fi
+
+# And the loop actually runs from such a path, not just --check.
+d="$TMP/Run Space"
+mkdir -p "$d"
+cp "$TARGET" "$d/run-forever.sh"
+fake_binary "$d/collector"
+( cd "$TMP" && "$SH" "$d/run-forever.sh" >/dev/null 2>&1 ) &
+loop_pid=$!
+sleep 3
+kill "$loop_pid" 2>/dev/null
+wait "$loop_pid" 2>/dev/null
+if contains "fake collector ran" "$(cat "$d/collector.log" 2>/dev/null || true)"; then
+  ok "the loop runs a worker found under a path with spaces"
+else
+  no "the loop runs a worker found under a path with spaces" "no output in $d/collector.log"
+fi
+
 echo
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
