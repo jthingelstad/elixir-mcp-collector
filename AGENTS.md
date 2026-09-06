@@ -118,14 +118,28 @@ makes "no AWS access" a property of the build rather than a promise.
 
 ## Local services on this host
 
-Jamie's machine runs the v2 pair: `com.poapkings.elixir-mcp-gw-go` (Go,
-env `.env.local-go`) and `com.poapkings.elixir-mcp-gw2-py`
-(`python/collector.py`, env `python/.env`) — card identities Ram Rider
-and Tesla, both on the `live` channel. Dev builds, so they don't
-self-update: after any door change or new build, reload with
-`launchctl unload/load` (a plist env-path change needs a full reload,
-not just `kickstart`). Logs:
+Jamie's machine runs the v2 pair, card identities Ram Rider (Go) and
+Tesla (Python), both on the `live` channel. **Neither runs out of this
+checkout any more** (2026-09-06): both were moved to released artifacts
+under `~/elixir-collectors/<name>/`, each with its own `.env` beside it,
+so editing this repo cannot reach a live collector.
+
+- `com.poapkings.elixir-mcp-gw-go` -> `~/elixir-collectors/ram-rider/collector`,
+  a released Go binary. It SELF-UPDATES, so a door change no longer needs
+  a hand bounce here.
+- `com.poapkings.elixir-mcp-gw2-py` -> `~/elixir-collectors/tesla/collector.py`,
+  the released Python twin (`py-<tag>`). It never self-updates by design;
+  re-download it from a release when you want it current. Keep this one
+  Python — one Go plus one Python is the whole point of the twin, and
+  Jamie has said so explicitly.
+
+Reload either with `launchctl unload/load` (a plist path or env change
+needs a full reload, not `kickstart`). Logs:
 `~/Library/Logs/elixir-mcp-gw-go.log` and `…-gw2-py.log`.
+
+Do NOT run a staged collector by hand to check its version: if a `.env`
+is already beside it you have just started a second live collector on
+that identity. Read the version from the log after launchd starts it.
 
 ---
 
