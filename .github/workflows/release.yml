@@ -61,9 +61,16 @@ jobs:
           # `releases/latest` is what install.sh and the README hand a new
           # operator - so a fresh install gets the version the fleet is
           # actually on, never an unsoaked build.
+          # One printf, no heredoc: a heredoc terminator inside a YAML
+          # block scalar depends on how the block strips indentation, and
+          # an unindented line ends the block and breaks the whole file.
+          printf '%s\n' \
+            "Candidate build from green main (${{ github.sha }})." \
+            "" \
+            "Not yet named as the update authority, so no collector installs it." \
+            "When Elixir MCP names this version, this release is promoted to Latest." \
+            > notes.md
           gh release create "$VERSION" dist/* \
             --title "$VERSION" \
             --prerelease \
-            --notes "Candidate build from green main (${{ github.sha }}).
-
-Not yet named as the update authority: no collector installs this until Elixir MCP names it, at which point this release is promoted to Latest."
+            --notes-file notes.md
