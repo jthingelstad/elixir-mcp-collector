@@ -19,7 +19,13 @@ jobs:
       - name: build matrix
         run: |
           set -euo pipefail
-          VERSION="v0.1.${{ github.run_number }}"
+          # 2.0.x is the ZERO-TRUST CLIENT GENERATION, and it is the
+          # number the server's min_client_version gates on. Before this
+          # the binaries said v0.1.x while the door asked for 2.0.0 -
+          # two different kinds of number, which is why nothing could
+          # enforce it. Keep the major at 2 for as long as the
+          # config/lease/submit contract holds.
+          VERSION="v2.0.${{ github.run_number }}"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           mkdir -p dist
           build() {
