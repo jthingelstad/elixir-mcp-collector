@@ -1,143 +1,172 @@
 # Elixir MCP Collector
 
-The operator-run half of [Elixir MCP](https://elixir.poapkings.com): a small
-worker that leases fetch jobs from a queue, fetches from the Clash Royale API
-with your IP-bound key, and posts gzipped results back. Collectors never
-choose their own targets and hold no user data. More collectors mean
-redundancy and resilience — never a bigger rate budget: the fleet shares one
-global 1 rps budget by design.
+**What this is:** the operator-run worker for
+[Elixir MCP](https://elixir.poapkings.com), a service that records
+Clash Royale history and serves it to AI agents. Clash Royale's own API
+only returns the present moment; Elixir MCP keeps the history — and this
+small program is how the data gets fetched.
 
-Running one earns its owner a higher daily tool-call quota, a Clash Royale
-card avatar, and a spot on the collector ladder.
+**Why it exists:** the Clash Royale API only accepts requests from
+allowlisted IP addresses, so fetching has to happen on machines with
+stable IPs that volunteers run. A collector leases a work item ("fetch
+this player", "fetch this clan's war") from Elixir MCP over HTTPS,
+calls the Clash Royale API with the operator's own key, and posts the
+result back. It never chooses its own targets and never sees any user's
+private data — only public game data.
 
-You need:
+**Zero trust by design.** A collector holds exactly two secrets: your
+Clash Royale API key and a bearer token Elixir MCP issues you. It talks
+to **three HTTPS endpoints and nothing else** — no AWS credentials, no
+database, no cloud access of any kind. Elixir MCP tells the running
+collector what to fetch (it even computes the exact API path), so the
+service can change what it collects without you ever updating anything.
+More collectors mean resilience, never a bigger rate budget: the whole
+fleet shares one global ~1 request/second budget by design (that is
+Supercell Terms-of-Service posture, not a limitation to work around).
 
-- a machine that stays on (macOS/launchd and Linux/systemd are the
-  paved paths; the worker is plain Node — two pure-JS dependencies, no
-  native modules — and runs anywhere a supervisor can restart it),
-- a **static public IP** (Supercell keys are IP-allowlisted — this is
-  the requirement that actually gates a site, not the hardware),
-- Node 18+ (24+ recommended; 18 is the floor the code and AWS SDK need).
+Running a collector earns its operator a higher daily tool-call quota
+on Elixir MCP, a Clash Royale card as its public identity, and a spot
+on the collector ladder.
+
+Two interchangeable implementations live here — a **Go** binary and a
+**Python** script — deliberately, so a bad release of one can never
+silence a whole fleet. Pick whichever your machine prefers.
+
+## You need
+
+- A machine that stays on, with a **static public IP** (this is the
+  real requirement — Clash Royale keys are IP-allowlisted).
+- A **Clash Royale API key** from <https://developer.clashroyale.com>,
+  created with that IP allowlisted.
+- Either nothing else (the Go binary is self-contained) or **Python
+  3.8+** (standard library only — no `pip install`).
 
 ## 1. Raise your hand
 
-Sign in at <https://elixir.poapkings.com/dashboard> and use **Run a gateway**:
-pick a short name and submit your static IP. Your collector appears as
-`pending`.
+At <https://elixir.poapkings.com> → **Account → Collector**, pick a
+short machine name and raise your hand. Elixir MCP assigns your
+collector a Clash Royale **card identity** (its public name). When the
+maintainer approves and provisions it, that same page shows your
+**collector token once** — copy it. It looks like `emcg_…`.
 
-The owner then does two manual steps for you:
+There is no IP to submit, no account to create on our side, no
+credentials handed over out of band. Just the token you copy.
 
-- creates a Clash Royale API key **allowlisting your IP** (the key stays in
-  the owner's Supercell developer account — instant revocation, one ToS
-  story for the whole fleet),
-- creates a per-collector IAM user whose only permissions are: receive/delete
-  on the two request queues, send on the results queue, and PutMetricData.
+## 2. Configure
 
-You'll receive the key, the AWS credentials, and your `gateway_id` out of
-band (never through this repo or the site).
-
-## 2. Install
+Copy `.env.example` to `.env` (mode `600`) next to where the collector
+will run, and fill in the two secrets:
 
 ```sh
-git clone https://github.com/jthingelstad/elixir-mcp-collector.git
-cd elixir-mcp-collector && npm install
+CR_API_TOKEN=your-clash-royale-key
+ELIXIR_API_TOKEN=emcg_your-collector-token
 ```
 
-Create `.env` in the repo root, mode 0600 — this file is gitignored and must
-never be committed:
+That is the entire configuration. Everything else — how fast to fetch,
+what to fetch, when to back off — the server hands the collector at
+startup.
+
+## 3. Run it
+
+**Easiest (Go binary + supervisor), one command:**
 
 ```sh
-CR_API_TOKEN=<the key you received>
-ELIXIR_MCP_GATEWAY_ID=<your gateway_id>
-ELIXIR_MCP_GATEWAY_NAME=<your collector name>
-AWS_ACCESS_KEY_ID=<per-collector IAM user>
-AWS_SECRET_ACCESS_KEY=<per-collector IAM user>
-AWS_REGION=us-east-1
+curl -fsSL https://raw.githubusercontent.com/jthingelstad/elixir-mcp-collector/main/scripts/install.sh | sh
 ```
 
-Then install the LaunchAgent (RunAtLoad + KeepAlive, logs to
-`~/Library/Logs/elixir-mcp-gw.log`):
+Run it from the directory holding your `.env`. It downloads the right
+prebuilt binary for your platform (verifying its SHA-256), then installs
+a supervised service — launchd on macOS, or prints the systemd steps on
+Linux — that keeps the collector running and restarts it after a
+self-update.
+
+**Manual Go binary:** download the asset for your platform from the
+[latest release](https://github.com/jthingelstad/elixir-mcp-collector/releases/latest)
+(`collector_darwin_arm64`, `collector_linux_amd64`,
+`collector_linux_arm64`, `collector_linux_armv7`), `chmod +x` it, and
+run it beside your `.env`. Supervise it however your host does:
+
+- **macOS:** `scripts/install.sh` writes a launchd agent.
+- **Linux (systemd):** edit `User=`/`WorkingDirectory=` in
+  `scripts/elixir-collector.service`, copy it to
+  `/etc/systemd/system/`, then `sudo systemctl enable --now
+  elixir-collector`.
+- **Synology DSM / anything else:** `scripts/run-forever.sh` is a plain
+  KeepAlive loop — point a Task Scheduler boot-up task or `nohup` at it.
+
+**Python (no binary):** with Python 3.8+ and your `.env` in the same
+directory:
 
 ```sh
-node scripts/install-launchd.mjs
+python3 python/collector.py
 ```
 
-Running more than one collector on a host (each with its own key and
-gateway_id): put the second instance's config in `.env.gw2` and install
-with `--instance 2` (own label, own log).
+Supervise it the same way (systemd, DSM Task Scheduler, or
+`run-forever.sh`).
 
-### Linux (systemd)
+## 4. Confirm it's working
+
+Each collector writes JSON log lines to a file (launchd:
+`~/Library/Logs/elixir-mcp-collector.log`; other supervisors: wherever
+you route stdout). Within a few minutes you'll see a startup line, a
+`config` line showing your channel, and then an **activity summary
+every 5 minutes** — jobs done, fetch errors, channel. Warnings cover
+rate-limit backoff and refused leases; if the collector can't reach the
+service for 5 minutes it logs an error and exits so the supervisor
+restarts it clean.
 
 ```sh
-sudo cp scripts/elixir-collector.service /etc/systemd/system/
-# edit User= and WorkingDirectory= in the copy, then:
-sudo systemctl enable --now elixir-collector
+tail -f ~/Library/Logs/elixir-mcp-collector.log
 ```
 
-### Synology DSM / anything else
+Your collector's public status (by card name, heartbeat, and hourly
+fetch rate) also shows on <https://elixir.poapkings.com/data/status>.
 
-`scripts/run-forever.sh` is launchd's KeepAlive as a shell loop — run it
-under whatever the host offers:
+## Lifecycle
 
-- **Synology DSM 7**: Control Panel → Task Scheduler → Create →
-  Triggered Task → _Boot-up_, running as your user:
-  `sh /volume1/path/to/elixir-mcp-collector/scripts/run-forever.sh`.
-  Logs land in `collector.log` in the repo root.
-- Node on 32-bit ARM NAS models (armv7, e.g. DS416): Package Center's
-  Node.js if offered for your model, else an
-  [unofficial-builds](https://unofficial-builds.nodejs.org/download/release/)
-  `linux-armv7l` tarball — point the wrapper at it with
-  `NODE_BIN=/path/to/node`. Git comes from Package Center's Git Server
-  package (or Entware).
+`pending` → the maintainer provisions your token → `probation` (it does
+real work immediately) → after a few clean days, `active`. `draining`
+means no new work (planned retirement or a tripped safety breaker);
+`revoked` means the token no longer works. Revoking is instant and is
+the only thing needed to remove a collector — there is no cloud account
+to tear down.
 
-Check the log for `leased` / `fetched` lines within a couple of minutes.
+## Staying current
 
-## 3. Staying current
+Released Go binaries self-update: the collector installs only the exact
+version and SHA-256 the **server** names, so a compromised release page
+alone cannot push code to operators. An update failure never stops
+collection. The Python script and locally-built binaries do not
+self-update — update them yourself.
 
-The worker self-updates: once an hour it fast-forwards to this repo's
-`main` (CI-gated) and restarts itself. A dirty or locally-diverged checkout
-never auto-updates — experiment freely; your version shows on the fleet
-panel until you rejoin main.
+## What a collector can and cannot do
 
-## 4. Probation → active
+- It fetches only the `(endpoint, entity_key)` pairs the server leases
+  it; targets are chosen and prioritized by Elixir MCP.
+- Its identity is stamped from its token server-side, so it cannot act
+  as another collector.
+- It paces itself (server-configured, ~1.5 s floor) and opens a circuit
+  breaker on repeated 403s rather than hammering the API; it honors
+  `Retry-After` on 429s.
+- It holds no AWS credentials and can reach nothing in the Elixir MCP
+  cloud beyond three HTTPS endpoints. It never sees accounts, emails,
+  or sessions — only public Clash Royale data.
 
-Once your collector heartbeats, the owner moves it to `probation`. It does
-real work immediately; after a few clean days it's flipped to `active`.
-`draining` means no new work (planned retirement or a tripped breaker);
-`revoked` means the server refuses its results and the key + IAM user are
-deleted.
+## Contributing / architecture
 
-## What a collector can and can't do
+The queue-message and API contracts are canonical in the main repo
+([`jthingelstad/elixir-mcp`](https://github.com/jthingelstad/elixir-mcp),
+`packages/contracts`) and enforced server-side; this repo's tests pin
+the shapes it produces so drift fails here first. `AGENTS.md` is the
+working guide; `docs/GO-PORT.md` is the design history. `main` must stay
+releasable — CI (`go test` + Python `unittest`) gates it.
 
-- It fetches exactly the `(endpoint, entity_key)` pairs it leases — targets
-  are pinned server-side, priority-ordered by Elixir MCP.
-- Every payload is schema-validated at ingest regardless of source, and
-  every fetch is attributed to your gateway_id.
-- It paces itself (1.5 s floor between fetches) and opens a circuit breaker
-  on consecutive 403s rather than hammering the API.
-- It never sees accounts, emails, or sessions — only public CR data.
+## License
+
+MIT — see [LICENSE](LICENSE).
 
 ---
 
 _This material is unofficial and is not endorsed by Supercell. For more
 information see Supercell's Fan Content Policy:
 www.supercell.com/fan-content-policy._
-
-## Logs
-
-Each collector writes structured JSON log lines to stdout, which the
-supervisor captures to a file:
-
-- Go: `~/Library/Logs/elixir-mcp-gw-go.log`
-- Python: `~/Library/Logs/elixir-mcp-gw2-py.log`
-
-Lines carry `level` (info/warn/error), `msg`, and a timestamp. Normal
-operation logs startup, the launch-time config, and an **activity
-summary every 5 minutes** (jobs done, fetch errors, channel) so the
-file shows what the collector is doing without logging every fetch.
-Warnings cover 429/breaker/refused-lease; the watchdog logs an error
-before exiting for a supervisor restart. Tail live:
-
-```sh
-tail -f ~/Library/Logs/elixir-mcp-gw-go.log
-```
