@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/jthingelstad/elixir-mcp-collector/internal/breaker"
@@ -121,7 +122,8 @@ func (c *Client) LoadConfig(selfUpdate bool) error {
 	c.Log("info", fmt.Sprintf("config: channel=%s pacing=%dms status=%s",
 		c.cfg.Gateway.Channel, c.cfg.PacingMS, c.cfg.Gateway.Status))
 	if selfUpdate && c.Version != "dev" {
-		if rel, ok := c.cfg.Update["go"]; ok && rel.Version != c.Version {
+		key := fmt.Sprintf("go-%s-%s", runtime.GOOS, runtime.GOARCH)
+		if rel, ok := c.cfg.Update[key]; ok && rel.Version != c.Version {
 			c.Log("info", "update authority names "+rel.Version+"; self-updating")
 			if err := c.applyUpdate(rel.URL, rel.Sha256); err != nil {
 				// An update failure never stops collection.
