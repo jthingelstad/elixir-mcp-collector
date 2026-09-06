@@ -115,6 +115,8 @@ class Collector:
         self.last_fetch_started = 0.0
         self.consecutive_403 = 0
         self.breaker_open_until = 0.0
+        self.jobs_done = 0
+        self.fetch_errors = 0
 
     def load_config(self):
         status, cfg = self.api("GET", "/config")
@@ -180,13 +182,25 @@ class Collector:
         s_status, _ = self.api("POST", "/submit", submit)
         if s_status != 200:
             log("warn", f"submit refused HTTP {s_status}")
+        self.jobs_done += 1
+        if not (kind == "http" and http_status == 200):
+            self.fetch_errors += 1
         return "job"
 
     def run(self):
         self.load_config()
         _touch_progress()
         last_config = self.now()
+        last_summary = self.now()
         while True:
+            # Activity summary every ~5 min so the log shows real work.
+            if self.now() - last_summary >= 300:
+                log("info", f"activity: {self.jobs_done} jobs done, "
+                    f"{self.fetch_errors} fetch errors in the last 5m "
+                    f"(channel={self.cfg['gateway']['channel']})")
+                self.jobs_done = 0
+                self.fetch_errors = 0
+                last_summary = self.now()
             if time.time() - _last_progress[0] > WATCHDOG_TIMEOUT_S:
                 log("error", "watchdog: no successful door contact in "
                     f"{WATCHDOG_TIMEOUT_S}s; exiting for supervisor restart")

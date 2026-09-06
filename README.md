@@ -122,3 +122,22 @@ deleted.
 _This material is unofficial and is not endorsed by Supercell. For more
 information see Supercell's Fan Content Policy:
 www.supercell.com/fan-content-policy._
+
+## Logs
+
+Each collector writes structured JSON log lines to stdout, which the
+supervisor captures to a file:
+
+- Go: `~/Library/Logs/elixir-mcp-gw-go.log`
+- Python: `~/Library/Logs/elixir-mcp-gw2-py.log`
+
+Lines carry `level` (info/warn/error), `msg`, and a timestamp. Normal
+operation logs startup, the launch-time config, and an **activity
+summary every 5 minutes** (jobs done, fetch errors, channel) so the
+file shows what the collector is doing without logging every fetch.
+Warnings cover 429/breaker/refused-lease; the watchdog logs an error
+before exiting for a supervisor restart. Tail live:
+
+```sh
+tail -f ~/Library/Logs/elixir-mcp-gw-go.log
+```

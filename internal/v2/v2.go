@@ -73,6 +73,8 @@ type Client struct {
 	brk              *breaker.Breaker
 	lastFetchStarted time.Time
 	lastProgress     time.Time // last successful door round-trip (watchdog)
+	jobsDone         int       // activity counters, flushed to the log
+	fetchErrors      int
 }
 
 // WatchdogTimeout: with no successful server contact for this long, the
@@ -267,6 +269,10 @@ func (c *Client) PollOnce(ctx context.Context) (Outcome, error) {
 	if sStatus != 200 {
 		c.Log("warn", fmt.Sprintf("submit refused HTTP %d", sStatus))
 	}
+	c.jobsDone++
+	if !(fetched.Kind == "http" && fetched.Status == 200) {
+		c.fetchErrors++
+	}
 	return Outcome{State: "job"}, nil
 }
 
@@ -279,7 +285,17 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 	c.lastProgress = c.Now()
 	lastConfig := c.Now()
+	lastSummary := c.Now()
 	for ctx.Err() == nil {
+		// Activity summary every ~5 min: the log shows what the
+		// collector is DOING, not just startup + errors.
+		if c.Now().Sub(lastSummary) >= 5*time.Minute {
+			c.Log("info", fmt.Sprintf(
+				"activity: %d jobs done, %d fetch errors in the last 5m (channel=%s)",
+				c.jobsDone, c.fetchErrors, c.cfg.Gateway.Channel))
+			c.jobsDone, c.fetchErrors = 0, 0
+			lastSummary = c.Now()
+		}
 		if c.Now().Sub(c.lastProgress) > WatchdogTimeout {
 			c.Log("error", "watchdog: no successful door contact in "+
 				WatchdogTimeout.String()+"; exiting for supervisor restart")
