@@ -192,6 +192,16 @@ func (w *Worker) handleLease(ctx context.Context, queueURL string, m *Message) (
 	}
 
 	fetched := w.pacedFetch(ctx, path)
+	if fetched.Kind == "http" && fetched.Status == 429 {
+		// The API named its own cooldown - honor it. Pushing the pace
+		// anchor forward makes the NEXT pacedFetch wait it out (sol-6 F3).
+		seconds := 60
+		if fetched.RetryAfterSeconds != nil && *fetched.RetryAfterSeconds > 0 {
+			seconds = *fetched.RetryAfterSeconds
+		}
+		w.lastFetchStartedAt = w.now().Add(time.Duration(seconds)*time.Second - minFetchIntervalMs*time.Millisecond)
+		w.log("warn", fmt.Sprintf("429 from the CR API; holding fetches %ds", seconds))
+	}
 	if fetched.Kind == "http" && fetched.Status == 403 {
 		if w.breaker.Record403() {
 			w.metrics.BreakerOpen()

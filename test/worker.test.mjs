@@ -308,3 +308,36 @@ test("consecutive fetches are paced to the CR minimum interval", async () => {
   assert.equal(sleeps.length, 2, "second and third fetches paced");
   assert.ok(sleeps.every((ms) => ms > 0 && ms <= 1500));
 });
+
+test("429: Retry-After holds the pace before the next fetch (sol-6 F3)", async () => {
+  const sqsBox = fakeSqs();
+  sqsBox.queues.bulk.push(JOB, JOB);
+  let clock = Date.parse("2026-09-03T16:00:00Z");
+  const sleeps = [];
+  let calls = 0;
+  const w = makeWorker({
+    sqs: sqsBox.sqs,
+    queues: sqsBox.urls,
+    crFetch: async () => {
+      calls += 1;
+      return calls === 1
+        ? { kind: "http", status: 429, retryAfterSeconds: "7" }
+        : { kind: "http", status: 200, bodyText: "{}" };
+    },
+    breaker: new CircuitBreaker(),
+    gatewayId: GW,
+    now: () => new Date(clock),
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      clock += ms;
+    },
+  });
+  await w.pollOnce();
+  await w.pollOnce();
+  assert.equal(calls, 2);
+  const held = sleeps.reduce((a, b) => a + b, 0);
+  assert.ok(
+    held >= 7000,
+    `the named cooldown was waited out before fetch two (slept ${held}ms)`,
+  );
+});

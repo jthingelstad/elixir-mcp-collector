@@ -91,6 +91,15 @@ export function makeWorker({
     }
 
     const fetched = await pacedFetch(crPath(job));
+    if (fetched.kind === "http" && fetched.status === 429) {
+      // The API named its own cooldown - honor it. Pushing the pace
+      // anchor forward makes the NEXT pacedFetch wait it out, so a 429
+      // is never followed by another fetch 1.5s later (sol-6 F3).
+      const seconds = Number(fetched.retryAfterSeconds) || 60;
+      lastFetchStartedAt =
+        now().getTime() + seconds * 1000 - MIN_FETCH_INTERVAL_MS;
+      log("warn", `429 from the CR API; holding fetches ${seconds}s`);
+    }
     if (fetched.kind === "http" && fetched.status === 403) {
       const opened = breaker.record403();
       if (opened) {

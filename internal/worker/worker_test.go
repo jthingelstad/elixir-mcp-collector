@@ -182,3 +182,45 @@ func TestOverflowEnvelope(t *testing.T) {
 		t.Fatalf("want loud overflow: %v", env["error"])
 	}
 }
+
+// Parity with the Node worker's 429 test (sol-6 F3): the API's named
+// cooldown is waited out before the next fetch.
+func TestRetryAfterHoldsPace(t *testing.T) {
+	job := `{"endpoint":"player","entity_key":"#20JJJ2CCRU","lane":"bulk"}`
+	sqs := &fakeSQS{bulkMsgs: []Message{{Body: job, ReceiptHandle: "r1"}, {Body: job, ReceiptHandle: "r2"}}}
+	clock := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	var slept time.Duration
+	calls := 0
+	seven := 7
+	w := New(Config{
+		SQS:    sqs,
+		Queues: Queues{Live: "q/live", Bulk: "q/bulk", Results: "q/results"},
+		Fetch: func(context.Context, string) crapi.Result {
+			calls++
+			if calls == 1 {
+				return crapi.Result{Kind: "http", Status: 429, RetryAfterSeconds: &seven}
+			}
+			return crapi.Result{Kind: "http", Status: 200, BodyText: "{}"}
+		},
+		Breaker:   breaker.New(func() time.Time { return clock }),
+		GatewayID: "gw-1",
+		Now:       func() time.Time { return clock },
+		Sleep: func(d time.Duration) {
+			slept += d
+			clock = clock.Add(d)
+		},
+	})
+	ctx := context.Background()
+	if _, err := w.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 2 fetches, got %d", calls)
+	}
+	if slept < 7*time.Second {
+		t.Fatalf("named cooldown not honored: slept %v", slept)
+	}
+}
