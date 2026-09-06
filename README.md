@@ -66,6 +66,12 @@ That is the entire configuration. Everything else — how fast to fetch,
 what to fetch, when to back off — the server hands the collector at
 startup.
 
+**Where `.env` goes:** each worker reads it from **its own directory**,
+not from wherever you happen to be standing. The Go binary looks beside
+the binary; `python/collector.py` looks beside `collector.py`, so the
+Python twin wants `python/.env`. Set `ELIXIR_MCP_ENV_FILE` to an
+absolute path if you would rather keep config somewhere else.
+
 ## 3. Run it
 
 Runs the same on **macOS, Windows, and Linux** — a prebuilt binary
@@ -120,19 +126,57 @@ exactly as well as a git checkout with the script in `scripts/`. With
 no binary in any of those places it prints what it looked for and
 exits, rather than restart-looping in silence.
 
-On Synology DSM, put the three files in a folder you own (say
-`/volume1/elixir-collector`), then add a **triggered task** in Control
-Panel → Task Scheduler → Create → Triggered Task → User-defined script,
-event **Boot**, running as your own user, with this command:
+On Synology DSM, start over SSH by making a folder you own. A DSM share
+is not writable by your user by default, so this takes `sudo`:
+
+```sh
+sudo mkdir -p /volume1/elixir-collector
+sudo chown "$USER" /volume1/elixir-collector
+cd /volume1/elixir-collector
+```
+
+Write your `.env` there first, because the installer looks for it in the
+current directory and stops if it is missing:
+
+```sh
+printf 'CR_API_TOKEN=%s\nELIXIR_API_TOKEN=%s\n' "your-cr-key" "emcg_your-token" > .env
+chmod 600 .env
+```
+
+Then pull the binary and the supervisor into the same folder:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jthingelstad/elixir-mcp-collector/main/scripts/install.sh | sh
+curl -fsSL -o run-forever.sh https://raw.githubusercontent.com/jthingelstad/elixir-mcp-collector/main/scripts/run-forever.sh
+```
+
+The installer notes that DSM has no user systemd and leaves the binary
+in place. Check what the supervisor resolves before you wire it to boot:
+
+```sh
+sh run-forever.sh --check
+```
+
+That prints the binary it found and the log it will write, and exits
+without running anything. Then add a **triggered task** in Control Panel
+→ Task Scheduler → Create → Triggered Task → User-defined script, event
+**Boot**, running as your own user, with this command:
 
 ```sh
 cd /volume1/elixir-collector && sh run-forever.sh
 ```
 
+**Always invoke it as `sh run-forever.sh`, never `./run-forever.sh`.** A
+file fetched with `curl` carries no executable bit, and a boot task that
+dies on permission denied tells you nothing.
+
 The log lands next to the binary — `/volume1/elixir-collector/collector.log`
 — unless you pass a path of your own as the one argument
-(`sh run-forever.sh /volume1/logs/collector.log`). If that path is not
-writable the script says so and exits immediately.
+(`sh run-forever.sh /volume1/logs/collector.log`). Start-up failures go
+to both stderr and that log, so a boot task that dies at the pre-flight
+check still leaves you something to read. The log rotates at 10 MB,
+keeping one previous generation as `collector.log.1`; set
+`MAX_LOG_BYTES` to change the threshold, or to `0` to turn rotation off.
 
 ### Prefer Python, or an unlisted platform?
 
@@ -141,7 +185,7 @@ The `python/collector.py` twin runs anywhere with **Python 3.8+**
 Go binary:
 
 ```sh
-python3 python/collector.py     # reads ./.env
+python3 python/collector.py     # reads python/.env, beside the script
 ```
 
 Supervise it with your platform's service manager (launchd, Scheduled

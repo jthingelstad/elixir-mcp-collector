@@ -168,6 +168,96 @@ else
   no "loop reports the exit code and restarts" "$log"
 fi
 
+# --- 8. start-up failures are mirrored into a log, not only stderr ---
+# Under DSM Task Scheduler and systemd nobody sees stderr, so a boot
+# task that dies at the pre-flight check must leave a trace on disk.
+d="$TMP/mirror"
+mkdir -p "$d"
+cp "$TARGET" "$d/run-forever.sh"
+( cd "$d" && "$SH" "$d/run-forever.sh" >/dev/null 2>&1 )
+log="$(cat "$d/collector.log" 2>/dev/null || true)"
+if contains "no collector binary found near" "$log"; then
+  ok "no-worker failure is mirrored into the log beside the script"
+else
+  no "no-worker failure is mirrored into the log beside the script" "$log"
+fi
+
+d="$TMP/mirror2"
+mkdir -p "$d/logs"
+cp "$TARGET" "$d/run-forever.sh"
+( cd "$TMP" && "$SH" "$d/run-forever.sh" "$d/logs/my.log" >/dev/null 2>&1 )
+log="$(cat "$d/logs/my.log" 2>/dev/null || true)"
+if contains "no collector binary found near" "$log"; then
+  ok "no-worker failure is mirrored into an explicit logfile argument"
+else
+  no "no-worker failure is mirrored into an explicit logfile argument" "$log"
+fi
+
+# An unwritable log must still reach stderr and must not wedge.
+d="$TMP/mirror3"
+mkdir -p "$d/ro"
+cp "$TARGET" "$d/run-forever.sh"
+chmod 555 "$d/ro"
+if [ -w "$d/ro" ]; then
+  echo "skip - unwritable mirror target still reaches stderr (running as root)"
+else
+  out="$( (cd "$d/ro" && "$SH" "$d/run-forever.sh" "$d/ro/x.log") 2>&1 )"
+  code=$?
+  if [ "$code" -ne 0 ] && contains "run-forever:" "$out"; then
+    ok "unwritable mirror target still reaches stderr and exits"
+  else
+    no "unwritable mirror target still reaches stderr and exits" "exit $code: $out"
+  fi
+fi
+chmod 755 "$d/ro"
+
+# --- 9. the log rotates instead of growing forever ---
+d="$TMP/rotate"
+mkdir -p "$d"
+cp "$TARGET" "$d/run-forever.sh"
+cat > "$d/collector" <<'BIN'
+#!/bin/sh
+# ~4 KB per run, so a 2 KB cap trips on the first restart.
+i=0
+while [ "$i" -lt 40 ]; do
+  echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  i=$((i + 1))
+done
+exit 1
+BIN
+chmod +x "$d/collector"
+( cd "$TMP" && MAX_LOG_BYTES=2048 "$SH" "$d/run-forever.sh" >/dev/null 2>&1 ) &
+loop_pid=$!
+sleep 3
+kill "$loop_pid" 2>/dev/null
+wait "$loop_pid" 2>/dev/null
+if [ -f "$d/collector.log.1" ]; then
+  ok "log rotates past MAX_LOG_BYTES, keeping one generation"
+else
+  no "log rotates past MAX_LOG_BYTES, keeping one generation" "no $d/collector.log.1"
+fi
+size="$(wc -c <"$d/collector.log" 2>/dev/null | tr -d ' ')"
+if [ -n "$size" ] && [ "$size" -lt 8192 ]; then
+  ok "log restarts small after rotation"
+else
+  no "log restarts small after rotation" "size=${size:-none}"
+fi
+
+d="$TMP/norotate"
+mkdir -p "$d"
+cp "$TARGET" "$d/run-forever.sh"
+fake_binary "$d/collector"
+( cd "$TMP" && MAX_LOG_BYTES=0 "$SH" "$d/run-forever.sh" >/dev/null 2>&1 ) &
+loop_pid=$!
+sleep 3
+kill "$loop_pid" 2>/dev/null
+wait "$loop_pid" 2>/dev/null
+if [ ! -f "$d/collector.log.1" ]; then
+  ok "MAX_LOG_BYTES=0 disables rotation"
+else
+  no "MAX_LOG_BYTES=0 disables rotation" "rotated anyway"
+fi
+
 echo
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

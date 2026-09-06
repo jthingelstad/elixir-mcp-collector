@@ -59,7 +59,8 @@ ledger); do not resurrect them.
 6. **Observability: the log shows work.** Both clients emit a JSON
    activity summary every 5 minutes (jobs done, fetch errors, channel).
    Don't log per-fetch (too noisy at ~40/min).
-7. Work lands on `main`; CI (`go test` + Python `unittest`, both in
+7. Work lands on `main`; CI (`go test`, Python `unittest`, and the
+   `run-forever.sh` shell tests, all in
    `.github/workflows/validate.yml`) is the pre-push gate. `main` must
    stay releasable — `release.yml` builds the four platform binaries
    from green main. Operator-facing behavior changes update `README.md`
@@ -82,9 +83,12 @@ ledger); do not resurrect them.
   `scripts/run-forever.sh` (generic POSIX KeepAlive loop for DSM and
   other hosts without a supervisor; finds the binary in its own dir,
   its parent, or `$PWD`, falls back to the Python twin, and exits with
-  a message rather than restart-looping when it finds neither),
-  `scripts/test-run-forever.sh` (its tests; CI runs them under both
-  `sh` and `dash`).
+  a message rather than restart-looping when it finds neither).
+  Start-up failures go to stderr AND are mirrored into the log, because
+  DSM Task Scheduler discards stderr; the log rotates at `MAX_LOG_BYTES`
+  (10 MB default, one generation) since volunteer hardware runs this for
+  years. `scripts/test-run-forever.sh` (its tests; CI runs them under
+  both `sh` and `dash`, dash standing in for BusyBox ash).
 - `docs/GO-PORT.md` — design history (parts superseded by the zero-trust
   transition; see its postscript).
 
