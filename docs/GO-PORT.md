@@ -66,7 +66,11 @@ hourly and exits; supervisor restarts. A binary needs a new contract:
   An unreachable GitHub never stops collection.
 - **Pinning/rollback**: `COLLECTOR_PIN_VERSION=v0.3.2` in `.env`
   freezes a machine (shows on the fleet panel like a stale SHA does
-  today); deleting the pin rejoins latest.
+  today); deleting the pin rejoins latest. [Historical: this env var is
+  wired only into the retired v1 SQS path. A zero-trust v2 collector
+  takes the version its server names, with no pin; to control your own
+  version, run the Python twin or a self-built `dev` binary. README
+  "Staying current" documents the live behavior.]
 - **Integrity, honestly scoped**: SHA256 verification over HTTPS from
   the same release. Artifact _signing_ (key held outside GitHub) is
   deliberately deferred — with the signing key in GitHub Actions

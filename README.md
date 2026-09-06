@@ -218,11 +218,66 @@ to tear down.
 
 ## Staying current
 
-Released Go binaries self-update: the collector installs only the exact
-version and SHA-256 the **server** names, so a compromised release page
-alone cannot push code to operators. An update failure never stops
-collection. The Python script and locally-built binaries do not
-self-update — update them yourself.
+Released Go binaries self-update. The Python script and locally-built
+binaries do not; update those yourself.
+
+**When it checks.** At startup, then once an hour, as part of the same
+`/config` call it already makes. There is no separate update poll and
+no push: a fleet-wide rollout therefore lands within an hour of the
+server naming a version, not instantly and not in days.
+
+**What it trusts.** The `/config` response names a version, a SHA-256,
+and a download URL for your exact platform. The collector installs that
+build only if the file it downloads matches that SHA-256. It never asks
+GitHub what the newest release is, so a compromised release page alone
+cannot push code to operators — the server is the only authority, and
+it names one build per platform.
+
+**What it needs to reach.** Three hosts, all HTTPS on 443. If your NAS
+or firewall allowlists egress, these are the entries:
+
+| Host | Why |
+|---|---|
+| `elixir.poapkings.com` | lease, submit, config |
+| `api.clashroyale.com` | the fetches themselves |
+| the update URL from `/config` | the new binary, today a GitHub release asset (`github.com`, redirecting to `objects.githubusercontent.com`) |
+
+**What it looks like in the log.** An update is not a mystery exit. You
+see the collector name it, then hand off to your supervisor:
+
+```
+{"level":"info","msg":"update authority names v0.1.15; self-updating"}
+{"level":"info","msg":"updated; exiting for supervisor restart"}
+```
+
+Then `run-forever: worker exited (0); restarting in 2s`, and a fresh
+startup line on the new version. An exit with no `updated` line above it
+is a crash or the watchdog, not an update. A failed update logs
+`self-update failed:` and keeps collecting on the old binary — an
+update failure never stops collection.
+
+**What version am I running?** Every startup logs it, so the newest such
+line in your log is the answer:
+
+```
+{"level":"info","msg":"gateway up (go, zero-trust v2) version=v0.1.14"}
+```
+
+The collector also sends that version to the server on every call, so
+the maintainer can see your version even when you cannot.
+
+**On Windows**, a running `.exe` cannot be overwritten, so the update
+renames the old binary to `collector.exe.old` beside itself and writes
+the new one in its place. That file is deleted at the next startup.
+Seeing one briefly is normal.
+
+**Can I pin or opt out?** Not on a released binary — it takes whatever
+version the server names, and that is the point of the trust model. If
+you need to control your own version, run the Python twin
+(`python/collector.py`, never self-updates) or build the Go binary
+yourself (`go build -o collector ./cmd/collector`, which stamps the
+version `dev` and disables self-update). Both are fully supported ways
+to run a collector.
 
 ## What a collector can and cannot do
 

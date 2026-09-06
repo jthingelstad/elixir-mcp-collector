@@ -42,7 +42,14 @@ ledger); do not resurrect them.
 4. **Self-update obeys the UPDATE AUTHORITY.** A release build installs
    only the exact version + SHA-256 the server's config endpoint names
    (key `go-<GOOS>-<GOARCH>`); a compromised release page alone cannot
-   push code to operators. Dev builds and the Python client never
+   push code to operators. The check rides the `/config` call at startup
+   and hourly after — there is no separate poll, so naming a version
+   reaches the fleet within the hour. v2 has NO pin or opt-out:
+   `COLLECTOR_PIN_VERSION` survives only in the retired v1 branch, and
+   the supported ways to control your own version are the Python twin
+   or a self-built `dev` binary. README "Staying current" is the
+   operator-facing version of this and must stay true to
+   `internal/v2/v2.go`. Dev builds and the Python client never
    self-update. (The `collector_release` rows the config endpoint serves
    are populated server-side; until they are, released binaries simply
    don't auto-update — that's safe.) Cross-platform: release.yml builds
