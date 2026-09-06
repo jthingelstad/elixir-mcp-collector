@@ -75,12 +75,23 @@ makes "no AWS access" a property of the build rather than a promise.
 7. **Observability: the log shows work.** Both clients emit a JSON
    activity summary every 5 minutes (jobs done, fetch errors, channel).
    Don't log per-fetch (too noisy at ~40/min).
-8. Work lands on `main`; CI (`go test`, Python `unittest`, and the
+8. **A published release is a CANDIDATE, not a shipment.** Every green
+   push publishes one as a PRERELEASE, and it reaches nobody until
+   Elixir MCP names it — naming also promotes that release to Latest.
+   `releases/latest` is what `install.sh`, `install.ps1` and the README
+   hand a new operator, so promotion-on-naming keeps a fresh install
+   matched to what the fleet actually runs. Soak a candidate on one
+   machine before naming it, and never flip the prerelease flag by hand
+   or the release page starts lying about what is live. Procedure,
+   including rollback and the platform-key trap that fails silently:
+   `docs/RELEASING-COLLECTOR.md` in the elixir-mcp repo.
+
+9. Work lands on `main`; CI (`go test`, Python `unittest`, and the
    `run-forever.sh` shell tests, all in
    `.github/workflows/validate.yml`) is the pre-push gate. `main` must
-   stay releasable — `release.yml` builds the four platform binaries
-   from green main. Operator-facing behavior changes update `README.md`
-   in the same commit.
+   stay releasable — `release.yml` builds the seven platform artifacts
+   plus the Python twin from green main. Operator-facing behavior
+   changes update `README.md` in the same commit.
 
 ## Layout
 
