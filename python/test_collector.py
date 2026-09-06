@@ -162,3 +162,70 @@ class OverflowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BreakerConfigParityTests(unittest.TestCase):
+    """The server owns the breaker; both runtimes must apply the SAME
+    config the same way. The Go client used to ignore these two fields
+    (collector issue #2) while this one honoured them — one config, two
+    behaviours. These pin the Python half of the contract."""
+
+    def _client(self, threshold, cooldown_s, clock):
+        cfg = json.loads(json.dumps(CONFIG))
+        cfg["breaker"] = {"threshold_403": threshold, "cooldown_s": cooldown_s}
+
+        def api_call(method, route, body=None):
+            if route.endswith("/config"):
+                return (200, cfg)
+            if route.endswith("/lease"):
+                return (
+                    200,
+                    {
+                        "job": {
+                            "endpoint": "player",
+                            "entity_key": "#2YG98VVQ",
+                            "lane": "bulk",
+                        },
+                        "cr_path": "/players/%232YG98VVQ",
+                        "lease": "x.y",
+                    },
+                )
+            return (200, {"ok": True})
+
+        c = collector.Collector(
+            "http://door",
+            "emcg_t",
+            "cr_t",
+            sleep=lambda s: None,
+            now=lambda: clock[0],
+            api_call=api_call,
+            cr_fetch=lambda path: ("http", 403, "denied", None),
+        )
+        c.load_config()
+        return c
+
+    def test_threshold_and_cooldown_come_from_the_server(self):
+        clock = [1000.0]
+        c = self._client(2, 30, clock)
+        self.assertEqual(c.poll_once(), "job")
+        self.assertEqual(c.poll_once(), "job")
+        # Two strikes, because the server said two - not five.
+        self.assertEqual(c.poll_once(), "breaker_open")
+        # And the cooldown is the server's 30s.
+        clock[0] += 29
+        self.assertEqual(c.poll_once(), "breaker_open")
+        clock[0] += 1
+        self.assertNotEqual(c.poll_once(), "breaker_open")
+
+    def test_config_refresh_does_not_clear_an_open_breaker(self):
+        clock = [1000.0]
+        c = self._client(2, 300, clock)
+        c.poll_once()
+        c.poll_once()
+        self.assertEqual(c.poll_once(), "breaker_open")
+        c.load_config()  # the hourly refresh
+        self.assertEqual(
+            c.poll_once(),
+            "breaker_open",
+            "a config refresh must not hand a stopped collector its fetches back",
+        )

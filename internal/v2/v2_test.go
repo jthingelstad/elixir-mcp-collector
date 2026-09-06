@@ -234,3 +234,117 @@ func TestV2RawCeilingIsDistinct(t *testing.T) {
 		t.Fatalf("counted as a lost fetch; got %d", c.fetchErrors)
 	}
 }
+
+// The server owns the breaker (AGENTS.md rule 2). The Go client used to
+// decode threshold_403 and cooldown_s and then ignore both, opening at
+// a hard-coded five and staying shut for a hard-coded fifteen minutes,
+// while the Python twin honoured them - two runtimes, two behaviours,
+// from one config. Collector issue #2.
+func TestV2BreakerHonoursServerConfig(t *testing.T) {
+	var fetches int
+	door := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/config"):
+			// Deliberately NOT the defaults: 2 strikes, 30s cooldown.
+			_, _ = w.Write([]byte(`{"pacing_ms":1,"breaker":{"threshold_403":2,"cooldown_s":30},
+				"overflow_bytes":250000,"poll":{"live_wait_s":8,"bulk_wait_s":2,"idle_backoff_s":1},
+				"min_client_version":"2.0.0","gateway":{"name":"t","channel":"bulk","status":"active"},"update":{}}`))
+		case strings.HasSuffix(r.URL.Path, "/lease"):
+			_, _ = w.Write([]byte(`{"job":{"endpoint":"player","entity_key":"#2YG98VVQ","lane":"bulk"},
+				"cr_path":"/players/%232YG98VVQ","lease":"x.y"}`))
+		case strings.HasSuffix(r.URL.Path, "/submit"):
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}
+	}))
+	defer door.Close()
+
+	clock := time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC)
+	c := &Client{
+		Base: door.URL, Token: "emcg_t", Version: "dev", HTTP: door.Client(),
+		Fetch: func(context.Context, string) crapi.Result {
+			fetches++
+			return crapi.Result{Kind: "http", Status: 403}
+		},
+		Log: func(string, string) {}, Now: func() time.Time { return clock },
+		Sleep: func(time.Duration) {},
+	}
+	if err := c.LoadConfig(false); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 2; i++ {
+		if _, err := c.PollOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, err := c.PollOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.State != "breaker_open" {
+		t.Fatalf("two 403s must open a threshold-2 breaker, got %s after %d fetches", out.State, fetches)
+	}
+	if fetches != 2 {
+		t.Fatalf("fetched %d times; the third call must not reach the CR API", fetches)
+	}
+
+	// And the cooldown is the server's 30 seconds, not a hard-coded 15m.
+	clock = clock.Add(30 * time.Second)
+	if out, err = c.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if out.State == "breaker_open" {
+		t.Fatal("after the server's 30s cooldown a probe must be allowed")
+	}
+}
+
+// An hourly config refresh must not hand a stopped collector its fetches
+// back: LoadConfig rebuilt the breaker, clearing an OPEN one every hour.
+func TestV2ConfigRefreshKeepsBreakerOpen(t *testing.T) {
+	door := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/config"):
+			_, _ = w.Write([]byte(`{"pacing_ms":1,"breaker":{"threshold_403":2,"cooldown_s":300},
+				"overflow_bytes":250000,"poll":{"live_wait_s":8,"bulk_wait_s":2,"idle_backoff_s":1},
+				"min_client_version":"2.0.0","gateway":{"name":"t","channel":"bulk","status":"active"},"update":{}}`))
+		case strings.HasSuffix(r.URL.Path, "/lease"):
+			_, _ = w.Write([]byte(`{"job":{"endpoint":"player","entity_key":"#2YG98VVQ","lane":"bulk"},
+				"cr_path":"/players/%232YG98VVQ","lease":"x.y"}`))
+		case strings.HasSuffix(r.URL.Path, "/submit"):
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}
+	}))
+	defer door.Close()
+
+	clock := time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC)
+	c := &Client{
+		Base: door.URL, Token: "emcg_t", Version: "dev", HTTP: door.Client(),
+		Fetch: func(context.Context, string) crapi.Result {
+			return crapi.Result{Kind: "http", Status: 403}
+		},
+		Log: func(string, string) {}, Now: func() time.Time { return clock },
+		Sleep: func(time.Duration) {},
+	}
+	if err := c.LoadConfig(false); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := c.PollOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, _ := c.PollOnce(context.Background()); out.State != "breaker_open" {
+		t.Fatalf("precondition: breaker open, got %s", out.State)
+	}
+
+	if err := c.LoadConfig(false); err != nil { // the hourly refresh
+		t.Fatal(err)
+	}
+	out, err := c.PollOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.State != "breaker_open" {
+		t.Fatalf("a config refresh must not reopen the tap, got %s", out.State)
+	}
+}

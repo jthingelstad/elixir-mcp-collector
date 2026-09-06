@@ -131,7 +131,14 @@ func (c *Client) LoadConfig(selfUpdate bool) error {
 	if status != 200 {
 		return fmt.Errorf("config refused: HTTP %d", status)
 	}
-	c.brk = breaker.New(c.Now)
+	// Reconfigure in place rather than rebuilding: this runs hourly, and
+	// a fresh breaker would clear an OPEN one every refresh, resuming
+	// fetches the server had already told this collector to stop.
+	if c.brk == nil {
+		c.brk = breaker.New(c.Now, c.cfg.Breaker.Threshold403, c.cfg.Breaker.CooldownS)
+	} else {
+		c.brk.Configure(c.cfg.Breaker.Threshold403, c.cfg.Breaker.CooldownS)
+	}
 	c.Log("info", fmt.Sprintf("config: channel=%s pacing=%dms status=%s",
 		c.cfg.Gateway.Channel, c.cfg.PacingMS, c.cfg.Gateway.Status))
 	if selfUpdate && c.Version != "dev" {
