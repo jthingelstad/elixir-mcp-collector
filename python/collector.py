@@ -25,6 +25,18 @@ import urllib.request
 
 CR_BASE = "https://api.clashroyale.com/v1"
 VERSION = "py-2.0.0"
+# Watchdog: with no successful door contact for this long, exit so the
+# supervisor restarts clean (a wedged-but-alive process is invisible to
+# launchd KeepAlive; automates the manual kickstart from the 2026-09-06
+# phase-1-redeploy wedge).
+WATCHDOG_TIMEOUT_S = 300
+
+
+_last_progress = [time.time()]
+
+
+def _touch_progress():
+    _last_progress[0] = time.time()
 
 
 def log(level, msg):
@@ -60,8 +72,10 @@ def api(base, token, method, route, body=None, timeout=30):
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as res:
+            _touch_progress()
             return res.status, json.loads(res.read().decode() or "{}")
     except urllib.error.HTTPError as e:
+        _touch_progress()  # the door responded - not wedged
         try:
             return e.code, json.loads(e.read().decode() or "{}")
         except Exception:
@@ -170,8 +184,13 @@ class Collector:
 
     def run(self):
         self.load_config()
+        _touch_progress()
         last_config = self.now()
         while True:
+            if time.time() - _last_progress[0] > WATCHDOG_TIMEOUT_S:
+                log("error", "watchdog: no successful door contact in "
+                    f"{WATCHDOG_TIMEOUT_S}s; exiting for supervisor restart")
+                sys.exit(1)
             if self.now() - last_config > 3600:
                 try:
                     self.load_config()

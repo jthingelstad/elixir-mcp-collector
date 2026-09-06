@@ -72,7 +72,15 @@ type Client struct {
 	cfg              Config
 	brk              *breaker.Breaker
 	lastFetchStarted time.Time
+	lastProgress     time.Time // last successful door round-trip (watchdog)
 }
+
+// WatchdogTimeout: with no successful server contact for this long, the
+// process exits so the supervisor restarts it clean. A wedged-but-alive
+// collector (stale socket, poisoned state) is invisible to launchd's
+// KeepAlive otherwise - this automates the manual kickstart that
+// recovered the 2026-09-06 phase-1-redeploy wedge.
+const WatchdogTimeout = 5 * time.Minute
 
 func (c *Client) call(method, route string, body any, out any) (int, error) {
 	var rd io.Reader
@@ -104,6 +112,9 @@ func (c *Client) call(method, route string, body any, out any) (int, error) {
 			return res.StatusCode, err
 		}
 	}
+	// A response from the door - any status - is progress: the process
+	// is not wedged.
+	c.lastProgress = c.Now()
 	return res.StatusCode, nil
 }
 
@@ -266,8 +277,14 @@ func (c *Client) Run(ctx context.Context) error {
 	if err := c.LoadConfig(true); err != nil {
 		return err
 	}
+	c.lastProgress = c.Now()
 	lastConfig := c.Now()
 	for ctx.Err() == nil {
+		if c.Now().Sub(c.lastProgress) > WatchdogTimeout {
+			c.Log("error", "watchdog: no successful door contact in "+
+				WatchdogTimeout.String()+"; exiting for supervisor restart")
+			os.Exit(1)
+		}
 		if c.Now().Sub(lastConfig) > time.Hour {
 			if err := c.LoadConfig(true); err != nil {
 				c.Log("warn", "config refresh failed: "+err.Error())
