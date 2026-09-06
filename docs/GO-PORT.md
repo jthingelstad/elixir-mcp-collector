@@ -116,3 +116,12 @@ embedded version string.
 - armv7 is a first-class Go target; no unofficial anything.
 - DSM has no user systemd → Task Scheduler + run-forever.sh (already
   shipped, works unchanged with `NODE_BIN` simply unused).
+
+## Postscript (2026-09-06): superseded by zero-trust v2
+
+The phased Mac cutover this doc planned happened in one night, for a
+better reason than Go parity: the zero-trust transition
+(elixir-mcp `docs/COLLECTOR-ZERO-TRUST.md`). Collectors are now pure
+API clients; the Mac runs a Go + Python v2 pair; the Node worker is
+retired; self-update trust moved from GitHub releases to the server's
+update authority. Sections 3-5 of this doc are historical.
