@@ -1,8 +1,11 @@
 // elixir-mcp collector (Go): leases fetch jobs, calls the Clash Royale
 // API with an IP-bound key, posts gzipped results. Config from .env
-// next to the binary (or ELIXIR_MCP_ENV_FILE); same variable names as
-// the Node worker — credentials are drop-in. Split heartbeats: process
-// -alive every 60s, work-succeeding only on completed fetches.
+// next to the binary (or ELIXIR_MCP_ENV_FILE).
+//
+// A pure API client of Elixir MCP: three HTTPS endpoints, no AWS, no
+// database, no cloud access. The pre-zero-trust SQS transport and its
+// GitHub-polling self-updater were removed 2026-09-06; the server's
+// config endpoint is the only update authority now.
 package main
 
 import (
@@ -10,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -17,19 +21,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
-	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
-	"github.com/aws/aws-sdk-go-v2/service/sqs"
-
-	"net/http"
-
-	"github.com/jthingelstad/elixir-mcp-collector/internal/breaker"
 	"github.com/jthingelstad/elixir-mcp-collector/internal/crapi"
-	"github.com/jthingelstad/elixir-mcp-collector/internal/update"
 	"github.com/jthingelstad/elixir-mcp-collector/internal/v2"
-	"github.com/jthingelstad/elixir-mcp-collector/internal/worker"
 )
 
 // Injected by the release build: -ldflags "-X main.version=v0.1.x".
@@ -68,193 +61,53 @@ func loadEnv() {
 	}
 }
 
+// Exit code 2 means "this configuration will never work" — the
+// supervisor must stop rather than restart, because no number of
+// restarts conjures a token. run-forever.sh, the systemd unit and the
+// launchd plist all treat 2 as fatal.
 func required(name string) string {
 	v := os.Getenv(name)
 	if v == "" {
-		fmt.Fprintf(os.Stderr, "missing required config: %s\n", name)
+		fmt.Fprintf(os.Stderr,
+			"missing required config: %s (set it in .env next to this binary, or in $ELIXIR_MCP_ENV_FILE)\n", name)
 		os.Exit(2)
 	}
 	return v
 }
 
-func envOr(name, fallback string) string {
-	if v := os.Getenv(name); v != "" {
-		return v
-	}
-	return fallback
-}
-
-type sqsAdapter struct{ c *sqs.Client }
-
-func (a sqsAdapter) Receive(ctx context.Context, queueURL string, waitSeconds int32) (*worker.Message, error) {
-	out, err := a.c.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
-		QueueUrl:            aws.String(queueURL),
-		MaxNumberOfMessages: 1,
-		WaitTimeSeconds:     waitSeconds,
-		VisibilityTimeout:   60,
-	})
-	if err != nil || len(out.Messages) == 0 {
-		return nil, err
-	}
-	m := out.Messages[0]
-	return &worker.Message{Body: aws.ToString(m.Body), ReceiptHandle: aws.ToString(m.ReceiptHandle)}, nil
-}
-
-func (a sqsAdapter) Send(ctx context.Context, queueURL, body string) error {
-	_, err := a.c.SendMessage(ctx, &sqs.SendMessageInput{
-		QueueUrl: aws.String(queueURL), MessageBody: aws.String(body),
-	})
-	return err
-}
-
-func (a sqsAdapter) Delete(ctx context.Context, queueURL, receiptHandle string) error {
-	_, err := a.c.DeleteMessage(ctx, &sqs.DeleteMessageInput{
-		QueueUrl: aws.String(queueURL), ReceiptHandle: aws.String(receiptHandle),
-	})
-	return err
-}
-
 func main() {
 	loadEnv()
-	token := required("CR_API_TOKEN")
+	crToken := required("CR_API_TOKEN")
+	apiToken := required("ELIXIR_API_TOKEN")
 
-	// Zero-trust v2 (COLLECTOR-ZERO-TRUST.md): with an Elixir MCP API
-	// token present, this binary is a pure API client - no AWS at all.
-	if apiToken := os.Getenv("ELIXIR_API_TOKEN"); apiToken != "" {
-		base := os.Getenv("ELIXIR_API_BASE")
-		if base == "" {
-			base = "https://elixir.poapkings.com/api/collector"
-		}
-		ctx, cancel := signal.NotifyContext(
-			context.Background(), syscall.SIGINT, syscall.SIGTERM)
-		defer cancel()
-		fetcher := crapi.New(token)
-		client := &v2.Client{
-			Base:    base,
-			Token:   apiToken,
-			Version: version,
-			HTTP:    &http.Client{Timeout: 30 * time.Second},
-			Fetch:   fetcher.Fetch,
-			Log:     logJSON,
-			Now:     time.Now,
-			Sleep: func(d time.Duration) {
-				select {
-				case <-ctx.Done():
-				case <-time.After(d):
-				}
-			},
-		}
-		logJSON("info", "gateway up (go, zero-trust v2) version="+version)
-		if err := client.Run(ctx); err != nil && ctx.Err() == nil {
-			logJSON("error", err.Error())
-			os.Exit(1)
-		}
-		return
+	base := os.Getenv("ELIXIR_API_BASE")
+	if base == "" {
+		base = "https://elixir.poapkings.com/api/collector"
 	}
-	gatewayID := required("ELIXIR_MCP_GATEWAY_ID")
-	gatewayName := envOr("ELIXIR_MCP_GATEWAY_NAME", "gw")
-	region := envOr("AWS_REGION", "us-east-1")
-	pin := os.Getenv("COLLECTOR_PIN_VERSION")
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := signal.NotifyContext(
+		context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-	go func() { <-sig; cancel() }()
 
-	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
-	if err != nil {
-		logJSON("error", "aws config: "+err.Error())
-		os.Exit(1)
-	}
-	sqsClient := sqs.NewFromConfig(cfg)
-	cw := cloudwatch.NewFromConfig(cfg)
-
-	queueURL := func(name string) string {
-		out, err := sqsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: aws.String(name)})
-		if err != nil {
-			logJSON("error", "queue url "+name+": "+err.Error())
-			os.Exit(1)
-		}
-		return aws.ToString(out.QueueUrl)
-	}
-	queues := worker.Queues{
-		Live:    queueURL(envOr("ELIXIR_MCP_QUEUE_LIVE", "elixir-mcp-cr-requests-live")),
-		Bulk:    queueURL(envOr("ELIXIR_MCP_QUEUE_BULK", "elixir-mcp-cr-requests-bulk")),
-		Results: queueURL(envOr("ELIXIR_MCP_QUEUE_RESULTS", "elixir-mcp-cr-results")),
-	}
-
-	namespace := "ElixirMCP/Gateway/" + gatewayName
-	putMetric := func(name string) {
-		_, err := cw.PutMetricData(ctx, &cloudwatch.PutMetricDataInput{
-			Namespace: aws.String(namespace),
-			MetricData: []cwtypes.MetricDatum{{
-				MetricName: aws.String(name), Value: aws.Float64(1), Unit: cwtypes.StandardUnitCount,
-			}},
-		})
-		if err != nil {
-			logJSON("warn", "metric "+name+" failed: "+err.Error())
-		}
-	}
-
-	fetcher := crapi.New(token)
-	w := worker.New(worker.Config{
-		SQS:        sqsAdapter{sqsClient},
-		Queues:     queues,
-		Fetch:      fetcher.Fetch,
-		Breaker:    breaker.New(nil),
-		GatewayID:  gatewayID,
-		GatewaySha: version,
-		Metrics: worker.Metrics{
-			FetchSucceeded: func() { putMetric("FetchSucceeded") },
-			Overflow:       func() { putMetric("ResultOverflow") },
-			BreakerOpen:    func() { putMetric("BreakerOpen") },
+	fetcher := crapi.New(crToken)
+	client := &v2.Client{
+		Base:    base,
+		Token:   apiToken,
+		Version: version,
+		HTTP:    &http.Client{Timeout: 30 * time.Second},
+		Fetch:   fetcher.Fetch,
+		Log:     logJSON,
+		Now:     time.Now,
+		Sleep: func(d time.Duration) {
+			select {
+			case <-ctx.Done():
+			case <-time.After(d):
+			}
 		},
-		Log: logJSON,
-	})
-
-	go func() {
-		putMetric("Heartbeat")
-		t := time.NewTicker(60 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				putMetric("Heartbeat")
-			}
-		}
-	}()
-
-	go func() {
-		t := time.NewTicker(time.Hour)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				if update.Check(version, pin, logJSON) {
-					cancel()
-				}
-			}
-		}
-	}()
-
-	logJSON("info", "gateway up (go) version="+version)
-	for ctx.Err() == nil {
-		outcome, err := w.PollOnce(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				break
-			}
-			logJSON("error", err.Error())
-			time.Sleep(5 * time.Second)
-			continue
-		}
-		if outcome.Polled == "breaker_open" {
-			time.Sleep(5 * time.Second)
-		}
+	}
+	logJSON("info", "gateway up (go, zero-trust v2) version="+version)
+	if err := client.Run(ctx); err != nil && ctx.Err() == nil {
+		logJSON("error", err.Error())
+		os.Exit(1)
 	}
 }

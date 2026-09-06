@@ -26,6 +26,10 @@ ExecStart=/CHANGE_ME/elixir-mcp-collector/collector
 #   ExecStart=/usr/bin/env python3 /CHANGE_ME/elixir-mcp-collector/python/collector.py
 Restart=always
 RestartSec=2
+# Exit code 2 is a configuration error (missing CR_API_TOKEN or
+# ELIXIR_API_TOKEN). Restarting cannot fix it, so stop and let the
+# operator read the failure instead of spinning on it.
+RestartPreventExitStatus=2
 
 [Install]
 WantedBy=multi-user.target

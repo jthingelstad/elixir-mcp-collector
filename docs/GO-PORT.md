@@ -123,7 +123,7 @@ embedded version string.
   `NODE_BIN` is gone with the Node worker; run-forever.sh now falls back
   to the Python twin via `PYTHON_BIN`.]
 
-## Postscript (2026-09-06): superseded by zero-trust v2
+## Postscript (2026-09-06): superseded by zero-trust v2, then deleted
 
 The phased Mac cutover this doc planned happened in one night, for a
 better reason than Go parity: the zero-trust transition
@@ -131,3 +131,9 @@ better reason than Go parity: the zero-trust transition
 API clients; the Mac runs a Go + Python v2 pair; the Node worker is
 retired; self-update trust moved from GitHub releases to the server's
 update authority. Sections 3-5 of this doc are historical.
+
+Second pass the same day: the SQS transport and the GitHub-polling
+updater this doc designed were not just bypassed but removed.
+`internal/worker`, `internal/update` and every AWS SDK dependency are
+gone, leaving a stdlib-only module. Read §3-§5 as the reasoning that
+led here, not as a description of anything that still runs.

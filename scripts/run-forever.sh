@@ -34,6 +34,11 @@
 # beside collector.py. This loop does not care about the working
 # directory.
 #
+# Exit code 2 from the worker means bad configuration (a missing
+# CR_API_TOKEN or ELIXIR_API_TOKEN). No number of restarts conjures a
+# token, so this loop stops and says so instead of spinning forever.
+# Every other exit is restarted: crash, watchdog, or self-update.
+#
 # Environment:
 #   PYTHON_BIN     which python runs the Python twin (default python3)
 #   MAX_LOG_BYTES  rotate the log past this size (default 10485760;
@@ -172,6 +177,14 @@ while :; do
     "$PYTHON_BIN" "$PY_WORKER" >>"$LOG" 2>&1
   fi
   code=$?
+  if [ "$code" -eq 2 ]; then
+    # Configuration error. Restarting cannot fix it, and a 2s spin just
+    # buries the real message under thousands of identical lines.
+    msg="worker exited (2): bad configuration, most likely a missing CR_API_TOKEN or ELIXIR_API_TOKEN. Not restarting - fix .env and start this again. The worker's own error is the line above this one in $LOG."
+    echo "$(stamp) run-forever: $msg" >>"$LOG"
+    printf 'run-forever: %s\n' "$msg" >&2
+    exit 2
+  fi
   echo "$(stamp) run-forever: worker exited ($code); restarting in 2s" >>"$LOG"
   rotate_log
   sleep 2

@@ -16,7 +16,9 @@ interchangeable implementations — Go (`cmd/collector`, `internal/`) and
 Python (`python/collector.py`) — kept deliberately diverse so a bad
 release of one cannot silence a fleet. The old Node worker and the SQS
 transport were retired 2026-09-06 (zero-trust door + Postgres job
-ledger); do not resurrect them.
+ledger) and their code was DELETED the same day; do not resurrect them.
+The Go module now has no third-party dependencies at all, which is what
+makes "no AWS access" a property of the build rather than a promise.
 
 ## Rules
 
@@ -43,30 +45,37 @@ ledger); do not resurrect them.
    only the exact version + SHA-256 the server's config endpoint names
    (key `go-<GOOS>-<GOARCH>`); a compromised release page alone cannot
    push code to operators. The check rides the `/config` call at startup
-   and hourly after — there is no separate poll, so naming a version
-   reaches the fleet within the hour. v2 has NO pin or opt-out:
-   `COLLECTOR_PIN_VERSION` survives only in the retired v1 branch, and
-   the supported ways to control your own version are the Python twin
-   or a self-built `dev` binary. README "Staying current" is the
-   operator-facing version of this and must stay true to
-   `internal/v2/v2.go`. Dev builds and the Python client never
-   self-update. (The `collector_release` rows the config endpoint serves
-   are populated server-side; until they are, released binaries simply
-   don't auto-update — that's safe.) Cross-platform: release.yml builds
-   macOS (arm64/amd64), Windows (amd64/arm64), and Linux
+   and hourly after, so naming a version reaches the fleet within the
+   hour. There is NO pin and no opt-out, deliberately: the fleet shares
+   one rate budget and one contract, so a stale client is everyone's
+   problem. Do not add a pin flag, and do not present the Python twin as
+   a way to freeze a version - it is release insurance. Dev builds and
+   the Python client cannot self-update; their operators update when
+   asked. `min_client_version` is parsed from `/config` and NOT enforced
+   by either client, which is the obvious lever if a stale client ever
+   needs refusing. (The `collector_release` rows the config endpoint
+   serves are populated server-side; until they are, released binaries
+   simply don't auto-update - that's safe.) Cross-platform: release.yml
+   builds macOS (arm64/amd64), Windows (amd64/arm64), and Linux
    (amd64/arm64/armv7). Windows self-update renames the running .exe
-   aside (can't overwrite a locked binary) and cleans the `.old` at
-   next startup.
-5. **Durability: exit rather than wedge.** Both clients run a progress
+   aside (can't overwrite a locked binary) and cleans the `.old` at next
+   startup. README "Staying current" is the operator-facing version of
+   all this and must stay true to `internal/v2/v2.go`.
+5. **Exit codes are the supervisor contract.** 2 means the config will
+   never work (a missing token): `run-forever.sh` stops, systemd has
+   `RestartPreventExitStatus=2`, and no supervisor should spin on it.
+   Anything else is restartable - crash, watchdog, or self-update.
+   Both clients exit 2 for the same reason; keep them in step.
+6. **Durability: exit rather than wedge.** Both clients run a progress
    watchdog — 5 minutes with no successful server round-trip and the
    process exits(1) so the supervisor restarts it clean. Any door
    response (even an error) counts as progress. This exists because a
    door redeploy once wedged the dev collectors (alive but not
    progressing); launchd KeepAlive only restarts a process that EXITS.
-6. **Observability: the log shows work.** Both clients emit a JSON
+7. **Observability: the log shows work.** Both clients emit a JSON
    activity summary every 5 minutes (jobs done, fetch errors, channel).
    Don't log per-fetch (too noisy at ~40/min).
-7. Work lands on `main`; CI (`go test`, Python `unittest`, and the
+8. Work lands on `main`; CI (`go test`, Python `unittest`, and the
    `run-forever.sh` shell tests, all in
    `.github/workflows/validate.yml`) is the pre-push gate. `main` must
    stay releasable — `release.yml` builds the four platform binaries
@@ -75,12 +84,15 @@ ledger); do not resurrect them.
 
 ## Layout
 
-- `cmd/collector/main.go` — entrypoint; runs the v2 client when
-  `ELIXIR_API_TOKEN` is set.
+- `cmd/collector/main.go` — entrypoint. Requires `CR_API_TOKEN` and
+  `ELIXIR_API_TOKEN`; missing either is exit 2. The module has ZERO
+  third-party dependencies (stdlib only) since the SQS path went.
 - `internal/v2/` — the zero-trust client (config/lease/submit, watchdog,
   activity log, update authority).
 - `internal/crapi`, `internal/breaker` — CR API paths + the 403 breaker
-  (shared helpers).
+  (shared helpers). `internal/worker` (SQS envelopes) and
+  `internal/update` (GitHub-polling updater) were DELETED 2026-09-06
+  with the transport they served; do not reintroduce either.
 - `python/collector.py` — the stdlib-only twin; `python/test_collector.py`
   its tests.
 - `scripts/install.sh` — one-command install for macOS/Linux (download

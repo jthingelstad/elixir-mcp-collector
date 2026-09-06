@@ -258,6 +258,58 @@ else
   no "MAX_LOG_BYTES=0 disables rotation" "rotated anyway"
 fi
 
+# --- 10. exit 2 is a config error: stop, do not spin ---
+d="$TMP/cfgfail"
+mkdir -p "$d"
+cp "$TARGET" "$d/run-forever.sh"
+cat > "$d/collector" <<'BIN'
+#!/bin/sh
+echo "missing required config: ELIXIR_API_TOKEN" >&2
+exit 2
+BIN
+chmod +x "$d/collector"
+out="$( (cd "$TMP" && "$SH" "$d/run-forever.sh") 2>&1 )"
+code=$?
+if [ "$code" -eq 2 ]; then
+  ok "worker exit 2 stops the loop with exit 2"
+else
+  no "worker exit 2 stops the loop with exit 2" "exit $code: $out"
+fi
+if contains "Not restarting" "$out"; then
+  ok "config failure explains itself on stderr"
+else
+  no "config failure explains itself on stderr" "$out"
+fi
+log="$(cat "$d/collector.log" 2>/dev/null || true)"
+if contains "missing required config" "$log" && contains "bad configuration" "$log"; then
+  ok "config failure keeps the worker's own error next to ours in the log"
+else
+  no "config failure keeps the worker's own error next to ours in the log" "$log"
+fi
+runs="$(grep -c "worker exited" "$d/collector.log" 2>/dev/null || echo 0)"
+if [ "$runs" -eq 1 ]; then
+  ok "config failure runs the worker exactly once"
+else
+  no "config failure runs the worker exactly once" "ran $runs times"
+fi
+
+# Every other exit code still restarts.
+d="$TMP/othercode"
+mkdir -p "$d"
+cp "$TARGET" "$d/run-forever.sh"
+fake_binary "$d/collector"   # exits 7
+( cd "$TMP" && "$SH" "$d/run-forever.sh" >/dev/null 2>&1 ) &
+loop_pid=$!
+sleep 3
+kill "$loop_pid" 2>/dev/null
+wait "$loop_pid" 2>/dev/null
+runs="$(grep -c "worker exited (7)" "$d/collector.log" 2>/dev/null || echo 0)"
+if [ "$runs" -ge 2 ]; then
+  ok "a non-config exit still restarts"
+else
+  no "a non-config exit still restarts" "restarted $runs times"
+fi
+
 echo
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

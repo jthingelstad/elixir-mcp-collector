@@ -17,7 +17,8 @@ private data — only public game data.
 **Zero trust by design.** A collector holds exactly two secrets: your
 Clash Royale API key and a bearer token Elixir MCP issues you. It talks
 to **three HTTPS endpoints and nothing else** — no AWS credentials, no
-database, no cloud access of any kind. Elixir MCP tells the running
+database, no cloud access of any kind. The Go binary has no third-party
+dependencies at all: it is the Go standard library and nothing else. Elixir MCP tells the running
 collector what to fetch (it even computes the exact API path), so the
 service can change what it collects without you ever updating anything.
 More collectors mean resilience, never a bigger rate budget: the whole
@@ -218,8 +219,9 @@ to tear down.
 
 ## Staying current
 
-Released Go binaries self-update. The Python script and locally-built
-binaries do not; update those yourself.
+Released Go binaries self-update, always and automatically. The Python
+script and locally-built binaries cannot, so their operators are
+expected to update them when asked.
 
 **When it checks.** At startup, then once an hour, as part of the same
 `/config` call it already makes. There is no separate update poll and
@@ -271,13 +273,17 @@ renames the old binary to `collector.exe.old` beside itself and writes
 the new one in its place. That file is deleted at the next startup.
 Seeing one briefly is normal.
 
-**Can I pin or opt out?** Not on a released binary — it takes whatever
-version the server names, and that is the point of the trust model. If
-you need to control your own version, run the Python twin
-(`python/collector.py`, never self-updates) or build the Go binary
-yourself (`go build -o collector ./cmd/collector`, which stamps the
-version `dev` and disables self-update). Both are fully supported ways
-to run a collector.
+**Can I pin or opt out? No.** There is no pin, no version flag, and no
+opt-out. A released binary runs the version the server names, and that
+is deliberate: the fleet shares one global rate budget and one API
+contract, so a collector running last month's code is a liability to
+everyone else, not a private choice. If you cannot accept automatic
+updates, running a collector is not for you.
+
+The Python twin is not a way around this. It exists so that a bad Go
+release cannot silence the whole fleet, and operators who run it are
+expected to update it when asked. Self-built binaries are for
+developing on this repo, not for freezing a production collector.
 
 ## What a collector can and cannot do
 
