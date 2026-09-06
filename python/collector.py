@@ -30,6 +30,10 @@ VERSION = "py-2.0.0"
 # launchd KeepAlive; automates the manual kickstart from the 2026-09-06
 # phase-1-redeploy wedge).
 WATCHDOG_TIMEOUT_S = 300
+# Raw-response safety ceiling, distinct from the server-configured transport
+# overflow (which is judged on the gzip+base64 ENCODED size). No legitimate CR
+# response is anywhere near this; it only bounds what we are willing to gzip.
+MAX_RAW_BYTES = 8 * 1024 * 1024
 
 
 _last_progress = [time.time()]
@@ -162,15 +166,24 @@ class Collector:
             self.consecutive_403 = 0
 
         submit = {"lease": lease["lease"], "fetched_at": fetched_at}
+        overflow = False
         if kind == "http" and http_status == 200:
-            if len(body_text) > self.cfg["overflow_bytes"]:
+            raw = body_text.encode()
+            if len(raw) > MAX_RAW_BYTES:
+                # Explicit raw safety ceiling - distinct from the transport limit.
+                overflow = True
+            else:
+                b64 = base64.b64encode(gzip.compress(raw)).decode()
+                # The transport overflow is judged on the ENCODED size the
+                # door receives (DESIGN 5.1): raw battlelogs above 250 KB
+                # routinely compress 10-20x and must not be discarded.
+                if len(b64) > self.cfg["overflow_bytes"]:
+                    overflow = True
+            if overflow:
                 submit.update(status="error", error={"kind": "overflow"})
             else:
-                gz = gzip.compress(body_text.encode())
                 submit.update(
-                    status="ok",
-                    http_status=http_status,
-                    body_gzip_b64=base64.b64encode(gz).decode(),
+                    status="ok", http_status=http_status, body_gzip_b64=b64
                 )
         else:
             submit.update(
@@ -183,7 +196,8 @@ class Collector:
         if s_status != 200:
             log("warn", f"submit refused HTTP {s_status}")
         self.jobs_done += 1
-        if not (kind == "http" and http_status == 200):
+        # An overflow is a lost fetch and counts as one in the summary.
+        if overflow or not (kind == "http" and http_status == 200):
             self.fetch_errors += 1
         return "job"
 

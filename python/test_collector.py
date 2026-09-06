@@ -112,5 +112,53 @@ class V2Tests(unittest.TestCase):
         )
 
 
+class OverflowTests(unittest.TestCase):
+    """Collector issue #1: the transport overflow is judged on the ENCODED
+    size, a raw ceiling stays distinct, and an overflow is a counted error."""
+
+    def _run(self, body_text):
+        c, calls = make(
+            [
+                (200, CONFIG),
+                (
+                    200,
+                    {
+                        "job": {"endpoint": "player_battlelog", "entity_key": "#20JJJ2CCRU", "lane": "bulk"},
+                        "cr_path": "/players/%2320JJJ2CCRU/battlelog",
+                        "lease": "7",
+                    },
+                ),
+                (200, {"ok": True}),
+            ],
+            lambda path: ("http", 200, body_text, None),
+        )
+        c.load_config()
+        c.poll_once()
+        submit = next(b for m, r, b in calls if r == "/submit")
+        return c, submit
+
+    def test_large_but_compressible_body_fits_after_encoding(self):
+        c, submit = self._run("x" * 311_100)  # raw > 250 KB, tiny once gzipped
+        self.assertEqual(submit["status"], "ok")
+        self.assertLess(len(submit["body_gzip_b64"]), CONFIG["overflow_bytes"])
+        self.assertEqual(c.fetch_errors, 0)
+
+    def test_true_encoded_overflow_is_an_error_and_counted(self):
+        import random
+
+        rnd = random.Random(1)
+        body = "".join(chr(rnd.randrange(33, 127)) for _ in range(400_000))
+        c, submit = self._run(body)
+        self.assertEqual(submit["status"], "error")
+        self.assertEqual(submit["error"]["kind"], "overflow")
+        self.assertNotIn("body_gzip_b64", submit)
+        self.assertEqual(c.fetch_errors, 1, "an overflow is a lost fetch")
+
+    def test_raw_ceiling_is_distinct_and_explicit(self):
+        c, submit = self._run("x" * (collector.MAX_RAW_BYTES + 1))
+        self.assertEqual(submit["error"]["kind"], "overflow")
+        self.assertEqual(c.fetch_errors, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

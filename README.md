@@ -160,6 +160,10 @@ self-update — update them yourself.
 - It paces itself (server-configured, ~1.5 s floor) and opens a circuit
   breaker on repeated 403s rather than hammering the API; it honors
   `Retry-After` on 429s.
+- It judges the transport overflow limit on the gzip+base64 size it
+  actually sends (raw battlelogs well above 250 KB routinely fit once
+  compressed); a genuine overflow is submitted as a structured error and
+  counted as a lost fetch in the activity summary.
 - It holds no AWS credentials and can reach nothing in the Elixir MCP
   cloud beyond three HTTPS endpoints. It never sees accounts, emails,
   or sessions — only public Clash Royale data.

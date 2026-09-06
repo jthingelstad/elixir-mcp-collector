@@ -252,10 +252,11 @@ func (c *Client) PollOnce(ctx context.Context) (Outcome, error) {
 	}
 
 	submit := map[string]any{"lease": l.Lease, "fetched_at": fetchedAt}
+	overflow := false
 	if fetched.Kind == "http" && fetched.Status == 200 {
-		if len(fetched.BodyText) > c.cfg.OverflowBytes {
-			submit["status"] = "error"
-			submit["error"] = map[string]string{"kind": "overflow"}
+		if len(fetched.BodyText) > maxRawBytes {
+			// Explicit raw safety ceiling - distinct from the transport limit.
+			overflow = true
 		} else {
 			var gz bytes.Buffer
 			w := gzip.NewWriter(&gz)
@@ -265,9 +266,21 @@ func (c *Client) PollOnce(ctx context.Context) (Outcome, error) {
 			if err := w.Close(); err != nil {
 				return Outcome{}, err
 			}
-			submit["status"] = "ok"
-			submit["http_status"] = fetched.Status
-			submit["body_gzip_b64"] = base64.StdEncoding.EncodeToString(gz.Bytes())
+			b64 := base64.StdEncoding.EncodeToString(gz.Bytes())
+			// The transport overflow is judged on the ENCODED size the door
+			// receives (DESIGN 5.1): raw battlelogs above 250 KB routinely
+			// compress 10-20x and must not be discarded.
+			if len(b64) > c.cfg.OverflowBytes {
+				overflow = true
+			} else {
+				submit["status"] = "ok"
+				submit["http_status"] = fetched.Status
+				submit["body_gzip_b64"] = b64
+			}
+		}
+		if overflow {
+			submit["status"] = "error"
+			submit["error"] = map[string]string{"kind": "overflow"}
 		}
 	} else {
 		kind := "transport"
@@ -286,11 +299,18 @@ func (c *Client) PollOnce(ctx context.Context) (Outcome, error) {
 		c.Log("warn", fmt.Sprintf("submit refused HTTP %d", sStatus))
 	}
 	c.jobsDone++
-	if !(fetched.Kind == "http" && fetched.Status == 200) {
+	// An overflow is a lost fetch and counts as one in the summary.
+	if overflow || !(fetched.Kind == "http" && fetched.Status == 200) {
 		c.fetchErrors++
 	}
 	return Outcome{State: "job"}, nil
 }
+
+// maxRawBytes is the raw-response safety ceiling, distinct from the
+// server-configured transport overflow (judged on the gzip+base64 ENCODED
+// size). No legitimate CR response is anywhere near this; it only bounds
+// what we are willing to gzip.
+const maxRawBytes = 8 << 20
 
 // Run is the forever loop: config, then lease/fetch/submit with idle
 // backoff on bulk; live channels rely on the server-side long poll so
