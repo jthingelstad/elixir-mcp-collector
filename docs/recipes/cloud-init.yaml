@@ -1,0 +1,89 @@
+#cloud-config
+# Elixir MCP collector - one paste at instance creation, and the box
+# comes up collecting. Works on any Linux cloud VM with cloud-init
+# (Oracle Linux, Ubuntu, Debian, Rocky, Fedora...): it needs curl, a
+# sha256 tool and systemd, all of which those images have.
+#
+# Before pasting, replace the two secrets in .env below. That is the
+# whole configuration - everything else the server hands the collector
+# at startup. Read docs/recipes/cloud-init.md for the two caveats
+# (secrets in user data are readable from inside the instance; pin the
+# installer tag for rebuilds).
+
+# Keep the image's default login user (on Ubuntu, listing users without
+# `default` silently removes it and you lose SSH). The collector runs
+# as its own unprivileged system user.
+users:
+  - default
+  - name: collector
+    system: true
+    shell: /usr/sbin/nologin
+    homedir: /opt/elixir-collector
+    no_create_home: true
+
+write_files:
+  # The two secrets, mode 600, owned by the collector after runcmd
+  # (write_files runs before users exist on most images, so ownership
+  # is fixed below rather than declared here).
+  - path: /opt/elixir-collector/.env
+    permissions: "0600"
+    content: |
+      CR_API_TOKEN=REPLACE_WITH_YOUR_CLASH_ROYALE_KEY
+      ELIXIR_API_TOKEN=emcg_REPLACE_WITH_YOUR_COLLECTOR_TOKEN
+
+  # systemd supervision: restart on crash, on the self-update exit, and
+  # on the watchdog exit - but not on exit 2, which means the .env will
+  # never work and restarting cannot fix it.
+  - path: /etc/systemd/system/elixir-collector.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Elixir MCP collector
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=collector
+      WorkingDirectory=/opt/elixir-collector
+      ExecStart=/opt/elixir-collector/collector
+      Restart=always
+      RestartSec=5
+      RestartPreventExitStatus=2
+      # Hardening. The collector holds two secrets and talks to three
+      # HTTPS endpoints; it needs nothing else on the box. Its own
+      # directory stays writable because self-update swaps the binary
+      # in place.
+      NoNewPrivileges=true
+      ProtectSystem=strict
+      ProtectHome=true
+      PrivateTmp=true
+      ReadWritePaths=/opt/elixir-collector
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  # Pin the installer to a release tag so a rebuild months from now does
+  # the same thing (the binary it fetches is SHA-256-verified against
+  # that release; once running, the binary self-updates to whatever the
+  # server names, so the pin is about reproducing the install, not
+  # freezing the version).
+  - |
+    set -eu
+    TAG="v2.0.27"
+    cd /opt/elixir-collector
+    curl -fsSL "https://raw.githubusercontent.com/jthingelstad/elixir-mcp-collector/$TAG/scripts/install.sh" | sh
+    chown -R collector:collector /opt/elixir-collector
+    chmod 600 /opt/elixir-collector/.env
+    systemctl daemon-reload
+    systemctl enable --now elixir-collector
+    # The doctor's verdict is the last thing in the cloud-init log
+    # (`sudo cat /var/log/cloud-init-output.log`). Releases before
+    # doctor existed would start collecting in the foreground here
+    # instead, so the binary is asked first whether it has one.
+    if grep -q "Elixir MCP Collector doctor" /opt/elixir-collector/collector; then
+      runuser -u collector -- /opt/elixir-collector/collector doctor || true
+    else
+      echo "this collector release has no doctor; check with: systemctl status elixir-collector"
+    fi

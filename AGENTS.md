@@ -133,6 +133,17 @@ makes "no AWS access" a property of the build rather than a promise.
   (10 MB default, one generation) since volunteer hardware runs this for
   years. `scripts/test-run-forever.sh` (its tests; CI runs them under
   both `sh` and `dash`, dash standing in for BusyBox ash).
+- `docs/recipes/` — where to run one. `cloud-init.yaml` is the single
+  cloud recipe (any Linux VM with cloud-init: unprivileged user, .env
+  at 600, the repo's own installer pinned to a tag, a hardened systemd
+  unit with `ReadWritePaths` on the collector dir so self-update can
+  swap the binary, doctor's verdict at the end of the cloud-init log);
+  provider pages (Oracle Always Free, Hetzner) are the delta, never a
+  second copy of the procedure. Synology/macOS/Windows are the hand
+  recipes. No "last verified" headers - Jamie: ceremony. No
+  DigitalOcean page - its Reserved IP is an alias with ambiguous
+  egress. When the installer or the unit changes, the YAML changes in
+  the same commit.
 - `docs/GO-PORT.md` — design history (parts superseded by the zero-trust
   transition; see its postscript).
 

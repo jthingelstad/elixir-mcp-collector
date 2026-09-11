@@ -75,6 +75,12 @@ absolute path if you would rather keep config somewhere else.
 
 ## 3. Run it
 
+**Nowhere to run it yet?** [`docs/recipes/`](docs/recipes/README.md)
+has a decision table and a one-paste cloud-init file: an Oracle Always
+Free VM with a reserved IP costs nothing and comes up collecting from
+the create-instance form. Recipes for Hetzner, Synology, macOS and
+Windows are there too, and a template for adding yours.
+
 Runs the same on **macOS, Windows, and Linux** — a prebuilt binary
 exists for each (Apple Silicon and Intel Macs; Windows x64 and ARM;
 Linux x64, ARM64, and ARMv7). Pick your platform below; each installer
