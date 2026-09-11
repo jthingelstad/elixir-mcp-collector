@@ -123,6 +123,11 @@ class Collector:
         self.sleep = sleep
         self.now = now
         self.api = api_call or (lambda m, r, b=None: api(base, api_token, m, r, b))
+        self.submit_api = (
+            (lambda body, timeout: api_call("POST", "/submit", body))
+            if api_call
+            else (lambda body, timeout: api(base, api_token, "POST", "/submit", body, timeout))
+        )
         self.cr = cr_fetch or (lambda path: fetch_cr(cr_token, path))
         self.cfg = None
         self.last_fetch_started = 0.0
@@ -201,7 +206,7 @@ class Collector:
             )
             if http_status:
                 submit["http_status"] = http_status
-        s_status, _ = self.api("POST", "/submit", submit)
+        s_status = self.submit_with_retry(submit)
         if s_status != 200:
             log("warn", f"submit refused HTTP {s_status}")
         self.jobs_done += 1
@@ -209,6 +214,36 @@ class Collector:
         if overflow or not (kind == "http" and http_status == 200):
             self.fetch_errors += 1
         return "job"
+
+    def submit_with_retry(self, submit):
+        """Retry only transient submit failures without abandoning the lease."""
+        retry = self.cfg.get("submit_retry", {})
+        attempts = retry.get("max_attempts", 3)
+        attempts = 3 if not isinstance(attempts, int) or not 1 <= attempts <= 3 else attempts
+        timeout = retry.get("timeout_s", 20)
+        timeout = 20 if not isinstance(timeout, int) or not 1 <= timeout <= 20 else timeout
+        backoff_ms = retry.get("backoff_ms", 500)
+        backoff_ms = 500 if not isinstance(backoff_ms, int) or not 1 <= backoff_ms <= 5000 else backoff_ms
+
+        for attempt in range(1, attempts + 1):
+            try:
+                status, _ = self.submit_api(submit, timeout)
+                transient = status >= 500
+            except Exception as exc:  # transport failures are transient too
+                status, transient = None, True
+                detail = str(exc)
+            if not transient:
+                return status
+            if attempt == attempts:
+                return status
+            if status is None:
+                log("warn", f"submit transport failure; retrying same lease ({attempt}/{attempts}): {detail}")
+            else:
+                log("warn", f"submit refused HTTP {status}; retrying same lease ({attempt}/{attempts})")
+            self.sleep(backoff_ms / 1000)
+            backoff_ms *= 2
+
+        return None
 
     def run(self):
         self.load_config()

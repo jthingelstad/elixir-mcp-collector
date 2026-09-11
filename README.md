@@ -365,6 +365,8 @@ developing on this repo, not for freezing a production collector.
   actually sends (raw battlelogs well above 250 KB routinely fit once
   compressed); a genuine overflow is submitted as a structured error and
   counted as a lost fetch in the activity summary.
+- On a transport failure or server 5xx while submitting, it retries the
+  same lease within the server-supplied lease budget; a 4xx remains a refusal.
 - It holds no AWS credentials and can reach nothing in the Elixir MCP
   cloud beyond three HTTPS endpoints. It never sees accounts, emails,
   or sessions — only public Clash Royale data.

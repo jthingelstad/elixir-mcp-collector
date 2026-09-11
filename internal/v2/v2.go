@@ -37,6 +37,11 @@ type Config struct {
 		BulkWaitS    int `json:"bulk_wait_s"`
 		IdleBackoffS int `json:"idle_backoff_s"`
 	} `json:"poll"`
+	SubmitRetry struct {
+		MaxAttempts int `json:"max_attempts"`
+		TimeoutS    int `json:"timeout_s"`
+		BackoffMS   int `json:"backoff_ms"`
+	} `json:"submit_retry"`
 	MinClientVersion string `json:"min_client_version"`
 	Gateway          struct {
 		Name    string `json:"name"`
@@ -85,6 +90,10 @@ type Client struct {
 const WatchdogTimeout = 5 * time.Minute
 
 func (c *Client) call(method, route string, body any, out any) (int, error) {
+	return c.callWithHTTP(c.HTTP, method, route, body, out)
+}
+
+func (c *Client) callWithHTTP(client *http.Client, method, route string, body any, out any) (int, error) {
 	var rd io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -100,7 +109,7 @@ func (c *Client) call(method, route string, body any, out any) (int, error) {
 	req.Header.Set("authorization", "Bearer "+c.Token)
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("x-collector-version", c.Version)
-	res, err := c.HTTP.Do(req)
+	res, err := client.Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -118,6 +127,44 @@ func (c *Client) call(method, route string, body any, out any) (int, error) {
 	// is not wedged.
 	c.lastProgress = c.Now()
 	return res.StatusCode, nil
+}
+
+// submitWithRetry keeps a fetched result attached to its original lease when
+// the door has a transient failure. The server supplies the budget; guards
+// keep a malformed or older config safely inside the 90-second lease TTL.
+func (c *Client) submitWithRetry(submit map[string]any) (int, error) {
+	attempts := c.cfg.SubmitRetry.MaxAttempts
+	if attempts < 1 || attempts > 3 {
+		attempts = 3
+	}
+	timeout := time.Duration(c.cfg.SubmitRetry.TimeoutS) * time.Second
+	if timeout <= 0 || timeout > 20*time.Second {
+		timeout = 20 * time.Second
+	}
+	backoff := time.Duration(c.cfg.SubmitRetry.BackoffMS) * time.Millisecond
+	if backoff <= 0 || backoff > 5*time.Second {
+		backoff = 500 * time.Millisecond
+	}
+
+	for attempt := 1; attempt <= attempts; attempt++ {
+		client := *c.HTTP
+		client.Timeout = timeout
+		status, err := c.callWithHTTP(&client, "POST", "/submit", submit, nil)
+		if err == nil && status < 500 {
+			return status, nil
+		}
+		if attempt == attempts {
+			return status, err
+		}
+		if err != nil {
+			c.Log("warn", fmt.Sprintf("submit transport failure; retrying same lease (%d/%d): %v", attempt, attempts, err))
+		} else {
+			c.Log("warn", fmt.Sprintf("submit refused HTTP %d; retrying same lease (%d/%d)", status, attempt, attempts))
+		}
+		c.Sleep(backoff)
+		backoff *= 2
+	}
+	return 0, nil
 }
 
 // LoadConfig fetches the launch-time contract and applies the update
@@ -298,7 +345,7 @@ func (c *Client) PollOnce(ctx context.Context) (Outcome, error) {
 		submit["status"] = "error"
 		submit["error"] = map[string]string{"kind": kind}
 	}
-	sStatus, err := c.call("POST", "/submit", submit, nil)
+	sStatus, err := c.submitWithRetry(submit)
 	if err != nil {
 		return Outcome{}, err
 	}

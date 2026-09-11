@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -346,5 +347,52 @@ func TestV2ConfigRefreshKeepsBreakerOpen(t *testing.T) {
 	}
 	if out.State != "breaker_open" {
 		t.Fatalf("a config refresh must not reopen the tap, got %s", out.State)
+	}
+}
+
+func TestV2SubmitRetriesTransientServerFailureWithSameLease(t *testing.T) {
+	var submits []map[string]any
+	door := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/config"):
+			_, _ = w.Write([]byte(`{"pacing_ms":1,"breaker":{"threshold_403":5,"cooldown_s":1},
+				"overflow_bytes":250000,"poll":{"live_wait_s":8,"bulk_wait_s":2,"idle_backoff_s":1},
+				"submit_retry":{"max_attempts":3,"timeout_s":20,"backoff_ms":1},
+				"min_client_version":"2.0.0","gateway":{"name":"t","channel":"bulk","status":"active"},"update":{}}`))
+		case strings.HasSuffix(r.URL.Path, "/lease"):
+			_, _ = w.Write([]byte(`{"job":{"endpoint":"player","entity_key":"#20JJJ2CCRU","lane":"bulk"},
+				"cr_path":"/players/%2320JJJ2CCRU","lease":"same-lease"}`))
+		case strings.HasSuffix(r.URL.Path, "/submit"):
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			submits = append(submits, body)
+			if len(submits) == 1 {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":"ingest_failed"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}
+	}))
+	defer door.Close()
+
+	c := &Client{
+		Base: door.URL, Token: "emcg_t", Version: "dev", HTTP: door.Client(),
+		Fetch: func(context.Context, string) crapi.Result {
+			return crapi.Result{Kind: "http", Status: 200, BodyText: `{}`}
+		},
+		Log: func(string, string) {}, Now: time.Now, Sleep: func(time.Duration) {},
+	}
+	if err := c.LoadConfig(false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(submits) != 2 {
+		t.Fatalf("expected one retry, got %d submit calls", len(submits))
+	}
+	if !reflect.DeepEqual(submits[0], submits[1]) {
+		t.Fatalf("retry must preserve the exact lease payload: %v != %v", submits[0], submits[1])
 	}
 }

@@ -14,6 +14,7 @@ CONFIG = {
     "breaker": {"threshold_403": 5, "cooldown_s": 1},
     "overflow_bytes": 250000,
     "poll": {"live_wait_s": 8, "bulk_wait_s": 2, "idle_backoff_s": 1},
+    "submit_retry": {"max_attempts": 3, "timeout_s": 20, "backoff_ms": 1},
     "min_client_version": "2.0.0",
     "gateway": {"name": "t", "channel": "bulk", "status": "active"},
     "update": {},
@@ -79,6 +80,23 @@ class V2Tests(unittest.TestCase):
         c.load_config()
         self.assertEqual(c.poll_once(), "empty")
         self.assertEqual(c.poll_once(), "refused")
+
+    def test_submit_retries_a_transient_server_failure_with_same_lease(self):
+        c, calls = make(
+            [
+                (200, CONFIG),
+                (200, {"job": {"endpoint": "player", "entity_key": "#20JJJ2CCRU", "lane": "bulk"},
+                       "cr_path": "/players/%2320JJJ2CCRU", "lease": "same-lease"}),
+                (500, {"error": "ingest_failed"}),
+                (200, {"ok": True}),
+            ],
+            lambda p: ("http", 200, "{}", None),
+        )
+        c.load_config()
+        self.assertEqual(c.poll_once(), "job")
+        submits = [body for method, route, body in calls if (method, route) == ("POST", "/submit")]
+        self.assertEqual(len(submits), 2)
+        self.assertEqual(submits[0], submits[1])
 
     def test_breaker_opens_after_five_403s(self):
         script = [(200, CONFIG)]
