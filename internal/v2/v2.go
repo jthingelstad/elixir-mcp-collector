@@ -23,6 +23,7 @@ import (
 
 	"github.com/jthingelstad/elixir-mcp-collector/internal/breaker"
 	"github.com/jthingelstad/elixir-mcp-collector/internal/crapi"
+	"github.com/jthingelstad/elixir-mcp-collector/internal/filter"
 )
 
 type Config struct {
@@ -60,8 +61,11 @@ type lease struct {
 	Job    json.RawMessage `json:"job"`
 	CrPath string          `json:"cr_path"`
 	Lease  string          `json:"lease"`
-	Error  string          `json:"error"`
-	Hint   string          `json:"hint"`
+	// What the hub asks us to drop before submitting (2026-09-11): for a
+	// battlelog, everything at or before the newest battle it holds.
+	Filter *filter.Filter `json:"filter"`
+	Error  string         `json:"error"`
+	Hint   string         `json:"hint"`
 }
 
 type Client struct {
@@ -308,6 +312,15 @@ func (c *Client) PollOnce(ctx context.Context) (Outcome, error) {
 	submit := map[string]any{"lease": l.Lease, "fetched_at": fetchedAt}
 	overflow := false
 	if fetched.Kind == "http" && fetched.Status == 200 {
+		// Drop what the hub already holds, and say how much that was.
+		// The body stays the API's array; only the entries change.
+		if l.Filter != nil && l.Filter.BattlesAfter != "" {
+			if r := filter.Battlelog(fetched.BodyText, l.Filter.BattlesAfter); r.Applied {
+				fetched.BodyText = r.Body
+				submit["observed"] = r.Observed
+				submit["filtered"] = r.Filtered
+			}
+		}
 		if len(fetched.BodyText) > maxRawBytes {
 			// Explicit raw safety ceiling - distinct from the transport limit.
 			overflow = true

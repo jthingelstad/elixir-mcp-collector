@@ -1,9 +1,12 @@
 package v2
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -394,5 +397,80 @@ func TestV2SubmitRetriesTransientServerFailureWithSameLease(t *testing.T) {
 	}
 	if !reflect.DeepEqual(submits[0], submits[1]) {
 		t.Fatalf("retry must preserve the exact lease payload: %v != %v", submits[0], submits[1])
+	}
+}
+
+// A lease that carries filter.battles_after: the body submitted is the
+// API's array minus everything at or before the mark, with the counts
+// beside it; a lease without a filter submits the body verbatim and no
+// counts (pins the hub's contract of 2026-09-11).
+func TestV2LeaseFilterDropsBattlesTheHubHolds(t *testing.T) {
+	var submits []map[string]any
+	leases := []string{
+		`{"job":{"endpoint":"player_battlelog","entity_key":"#20JJJ2CCRU","lane":"bulk"},
+		  "cr_path":"/players/%2320JJJ2CCRU/battlelog","lease":"one",
+		  "filter":{"battles_after":"20260911T123456.000Z"}}`,
+		`{"job":{"endpoint":"player_battlelog","entity_key":"#20JJJ2CCRU","lane":"live"},
+		  "cr_path":"/players/%2320JJJ2CCRU/battlelog","lease":"two"}`,
+	}
+	door := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/config"):
+			_, _ = w.Write([]byte(`{"pacing_ms":1,"breaker":{"threshold_403":5,"cooldown_s":1},
+				"overflow_bytes":250000,"poll":{"live_wait_s":8,"bulk_wait_s":2,"idle_backoff_s":1},
+				"min_client_version":"2.0.0","gateway":{"name":"t","channel":"live","status":"active"},"update":{}}`))
+		case strings.HasSuffix(r.URL.Path, "/lease"):
+			if len(leases) == 0 {
+				_, _ = w.Write([]byte(`{"empty":true}`))
+				return
+			}
+			_, _ = w.Write([]byte(leases[0]))
+			leases = leases[1:]
+		case strings.HasSuffix(r.URL.Path, "/submit"):
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			submits = append(submits, body)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}
+	}))
+	defer door.Close()
+	log := `[{"battleTime":"20260911T130000.000Z","type":"PvP"},{"battleTime":"20260911T123456.000Z","type":"PvP"},{"battleTime":"20260911T120000.000Z","type":"PvP"}]`
+	c := &Client{
+		Base: door.URL, Token: "emcg_test", Version: "dev", HTTP: door.Client(),
+		Fetch: func(context.Context, string) crapi.Result {
+			return crapi.Result{Kind: "http", Status: 200, BodyText: log}
+		},
+		Log: func(string, string) {}, Now: time.Now, Sleep: func(time.Duration) {},
+	}
+	if err := c.LoadConfig(false); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := c.PollOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(submits) != 2 {
+		t.Fatalf("expected 2 submits, got %d", len(submits))
+	}
+	unzip := func(s map[string]any) string {
+		raw, _ := base64.StdEncoding.DecodeString(s["body_gzip_b64"].(string))
+		zr, _ := gzip.NewReader(bytes.NewReader(raw))
+		out, _ := io.ReadAll(zr)
+		return string(out)
+	}
+	filtered := submits[0]
+	if filtered["observed"] != float64(3) || filtered["filtered"] != float64(2) {
+		t.Fatalf("counts: %+v", filtered)
+	}
+	if got := unzip(filtered); got != `[{"battleTime":"20260911T130000.000Z","type":"PvP"}]` {
+		t.Fatalf("filtered body: %s", got)
+	}
+	whole := submits[1]
+	if _, has := whole["observed"]; has {
+		t.Fatalf("no filter on the lease, no counts on the submit: %+v", whole)
+	}
+	if got := unzip(whole); got != log {
+		t.Fatalf("unfiltered body must be verbatim: %s", got)
 	}
 }

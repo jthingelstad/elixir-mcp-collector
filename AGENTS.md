@@ -109,6 +109,17 @@ makes "no AWS access" a property of the build rather than a promise.
   tokens, returns 403 `revoked`, echoes `observed_ip`, and names the one
   CR path (`doctor.cr_path`) doctor may read. Both twins print the same
   report; `doctor_test.go` and `DoctorTests` pin the same wording.
+- `internal/filter/` — what a lease asks the collector to drop before
+  submitting (2026-09-11): `filter.battles_after` on a battlelog lease
+  is the newest battleTime the hub holds, in the API's own spelling;
+  `Battlelog()` keeps the entries after it (string compare, never a
+  date parse), returns observed/filtered counts, and leaves a non-array
+  body untouched so the hub still sees what the API said. The submit
+  carries `observed` and `filtered` beside `fetched_at`; the body stays
+  the API's array. Python: `filter_battlelog()`, same semantics, pinned
+  by `FilterTests`. The hub filters under its own mark regardless, so a
+  collector that ignores the filter is correct, only wasteful - which is
+  why the field is optional on both sides.
 - `internal/crapi`, `internal/breaker` — CR API paths + the 403 breaker
   (shared helpers). `internal/worker` (SQS envelopes) and
   `internal/update` (GitHub-polling updater) were DELETED 2026-09-06

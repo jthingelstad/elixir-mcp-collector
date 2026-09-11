@@ -93,6 +93,39 @@ def api(base, token, method, route, body=None, timeout=30):
             return e.code, {}
 
 
+def filter_battlelog(body_text, after):
+    """Apply the lease's filter (2026-09-11): keep the entries whose
+    battleTime is after `after`, the newest battle the hub already holds,
+    in the API's own spelling (20260911T123456.000Z) - battleTime strings
+    compare lexically, so nothing here parses a date. The body stays the
+    API's array, fewer entries. Returns (body, observed, filtered, applied);
+    a body that is not an array is returned untouched with applied=False so
+    the hub still sees exactly what the API said. An entry without a
+    readable battleTime is kept: dropping what we cannot judge would be a
+    silent loss. Same as the Go twin's filter.Battlelog."""
+    if not after:
+        return body_text, 0, 0, False
+    try:
+        entries = json.loads(body_text)
+    except ValueError:
+        return body_text, 0, 0, False
+    if not isinstance(entries, list):
+        return body_text, 0, 0, False
+    kept = [
+        e for e in entries
+        if not isinstance(e, dict)
+        or not isinstance(e.get("battleTime"), str)
+        or e["battleTime"] == ""
+        or e["battleTime"] > after
+    ]
+    return (
+        json.dumps(kept, separators=(",", ":"), ensure_ascii=False),
+        len(entries),
+        len(entries) - len(kept),
+        True,
+    )
+
+
 def fetch_cr(cr_token, path, timeout=15):
     """One CR API attempt: (kind, status, body_text, retry_after)."""
     req = urllib.request.Request(
@@ -182,6 +215,13 @@ class Collector:
         submit = {"lease": lease["lease"], "fetched_at": fetched_at}
         overflow = False
         if kind == "http" and http_status == 200:
+            # Drop what the hub already holds, and say how much that was.
+            after = (lease.get("filter") or {}).get("battles_after")
+            if after:
+                body_text, observed, dropped, applied = filter_battlelog(body_text, after)
+                if applied:
+                    submit["observed"] = observed
+                    submit["filtered"] = dropped
             raw = body_text.encode()
             if len(raw) > MAX_RAW_BYTES:
                 # Explicit raw safety ceiling - distinct from the transport limit.

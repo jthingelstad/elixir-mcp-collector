@@ -370,3 +370,56 @@ class DoctorTests(unittest.TestCase):
             finally:
                 os.environ.pop("ELIXIR_MCP_ENV_FILE", None)
                 os.environ.pop("DOCTOR_TEST_KEY", None)
+
+
+LOG = ('[{"battleTime":"20260911T130000.000Z","type":"PvP"},'
+       '{"battleTime":"20260911T123456.000Z","type":"PvP"},'
+       '{"battleTime":"20260911T120000.000Z","type":"PvP"}]')
+
+
+class FilterTests(unittest.TestCase):
+    """Mirrors internal/filter/filter_test.go and the v2 lease-filter test."""
+
+    def test_keeps_only_battles_after_the_mark(self):
+        body, observed, dropped, applied = collector.filter_battlelog(LOG, "20260911T123456.000Z")
+        self.assertEqual((observed, dropped, applied), (3, 2, True))
+        self.assertEqual(json.loads(body), [{"battleTime": "20260911T130000.000Z", "type": "PvP"}])
+
+    def test_nothing_new_is_an_empty_array_with_the_counts(self):
+        body, observed, dropped, applied = collector.filter_battlelog(LOG, "20260911T130000.000Z")
+        self.assertEqual((body, observed, dropped), ("[]", 3, 3))
+
+    def test_everything_new_drops_nothing(self):
+        _, observed, dropped, _ = collector.filter_battlelog(LOG, "20260911T110000.000Z")
+        self.assertEqual((observed, dropped), (3, 0))
+
+    def test_no_mark_or_no_array_leaves_the_body_alone(self):
+        self.assertEqual(collector.filter_battlelog(LOG, ""), (LOG, 0, 0, False))
+        err = '{"reason":"notFound"}'
+        self.assertEqual(collector.filter_battlelog(err, "20260911T110000.000Z"), (err, 0, 0, False))
+
+    def test_an_entry_without_battle_time_is_kept(self):
+        body, _, dropped, _ = collector.filter_battlelog('[{"type":"odd"}]', "20260911T110000.000Z")
+        self.assertEqual((json.loads(body), dropped), ([{"type": "odd"}], 0))
+
+    def test_lease_filter_drops_battles_the_hub_holds_and_a_live_lease_submits_verbatim(self):
+        leases = [
+            (200, {"job": {"endpoint": "player_battlelog", "entity_key": "#20JJJ2CCRU", "lane": "bulk"},
+                   "cr_path": "/players/%2320JJJ2CCRU/battlelog", "lease": "one",
+                   "filter": {"battles_after": "20260911T123456.000Z"}}),
+            (200, {"ok": True}),
+            (200, {"job": {"endpoint": "player_battlelog", "entity_key": "#20JJJ2CCRU", "lane": "live"},
+                   "cr_path": "/players/%2320JJJ2CCRU/battlelog", "lease": "two"}),
+            (200, {"ok": True}),
+        ]
+        c, calls = make(leases, lambda path: ("http", 200, LOG, None))
+        c.cfg = dict(CONFIG)
+        c.poll_once()
+        c.poll_once()
+        submits = [b for (m, r, b) in calls if r == "/submit"]
+        self.assertEqual(len(submits), 2)
+        unzip = lambda s: gzip.decompress(base64.b64decode(s["body_gzip_b64"])).decode()
+        self.assertEqual((submits[0]["observed"], submits[0]["filtered"]), (3, 2))
+        self.assertEqual(json.loads(unzip(submits[0])), [{"battleTime": "20260911T130000.000Z", "type": "PvP"}])
+        self.assertNotIn("observed", submits[1], "no filter on the lease, no counts on the submit")
+        self.assertEqual(unzip(submits[1]), LOG, "unfiltered body must be verbatim")

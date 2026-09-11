@@ -367,6 +367,13 @@ developing on this repo, not for freezing a production collector.
   counted as a lost fetch in the activity summary.
 - On a transport failure or server 5xx while submitting, it retries the
   same lease within the server-supplied lease budget; a 4xx remains a refusal.
+- When a lease carries a filter (a battlelog lease names the newest
+  battle Elixir MCP already holds for that player), it drops the entries
+  at or before it before submitting and reports how many it saw and
+  dropped. The body stays the API's own array, just the new entries, so
+  duplicates never cross the wire. It never parses a date to do this:
+  the mark arrives in the API's own `battleTime` spelling and strings
+  compare.
 - It holds no AWS credentials and can reach nothing in the Elixir MCP
   cloud beyond three HTTPS endpoints. It never sees accounts, emails,
   or sessions — only public Clash Royale data.
