@@ -89,7 +89,7 @@ func main() {
 		context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	fetcher := crapi.New(crToken)
+	fetcher := crapi.New(crToken, version)
 	client := &v2.Client{
 		Base:    base,
 		Token:   apiToken,

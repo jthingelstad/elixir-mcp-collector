@@ -1,14 +1,19 @@
 // Package crapi is the only code in the system that speaks to
 // api.clashroyale.com. Single attempt per lease: errors are posted as
 // results and the scheduler replans — retry policy lives in one place.
+//
+// The PATH is the hub's: every lease carries cr_path, computed by
+// packages/contracts in the hub from the job's endpoint and entity, and
+// this package fetches exactly that. It used to hold its own copy of the
+// path table as well, unreferenced, with a "?limit=100" baked into the
+// ranking paths - which is how a limit nobody remembered choosing read
+// as a collector bug for a day (2026-09-11). One owner, no copy.
 package crapi
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"time"
 )
@@ -17,40 +22,6 @@ const (
 	base      = "https://api.clashroyale.com/v1"
 	timeoutMs = 15_000
 )
-
-// Job is the leased fetch-job envelope (canonical shape:
-// packages/contracts in jthingelstad/elixir-mcp; wire names exact).
-type Job struct {
-	Endpoint  string `json:"endpoint"`
-	EntityKey string `json:"entity_key"`
-	Lane      string `json:"lane,omitempty"`
-}
-
-func enc(s string) string { return url.PathEscape(s) }
-
-// Path maps a job to its CR API path; unknown endpoints error BEFORE a
-// CR call is spent (malformed jobs re-lease toward the DLQ).
-func Path(j Job) (string, error) {
-	switch j.Endpoint {
-	case "player":
-		return "/players/" + enc(j.EntityKey), nil
-	case "player_battlelog":
-		return "/players/" + enc(j.EntityKey) + "/battlelog", nil
-	case "clan":
-		return "/clans/" + enc(j.EntityKey), nil
-	case "currentriverrace":
-		return "/clans/" + enc(j.EntityKey) + "/currentriverrace", nil
-	case "riverracelog":
-		return "/clans/" + enc(j.EntityKey) + "/riverracelog", nil
-	case "cards":
-		return "/cards", nil
-	case "rankings_players":
-		return "/locations/" + enc(j.EntityKey) + "/rankings/players?limit=100", nil
-	case "rankings_pol":
-		return "/locations/" + enc(j.EntityKey) + "/pathoflegend/players?limit=100", nil
-	}
-	return "", fmt.Errorf("no CR path for endpoint: %s", j.Endpoint)
-}
 
 // Result mirrors the Node fetcher's shape: Kind "http" or "transport".
 type Result struct {
@@ -62,14 +33,20 @@ type Result struct {
 }
 
 type Fetcher struct {
-	token  string
-	client *http.Client
+	token     string
+	userAgent string
+	client    *http.Client
 }
 
-func New(token string) *Fetcher {
+// New builds the one CR API client. version is the release tag the build
+// stamped (or "dev"): Supercell sees this string on every request, and
+// "Elixir-MCP-Gateway/0.1" - the old name, no real version - is what it
+// had been seeing since the rename.
+func New(token, version string) *Fetcher {
 	return &Fetcher{
-		token:  token,
-		client: &http.Client{Timeout: timeoutMs * time.Millisecond},
+		token:     token,
+		userAgent: "Elixir-MCP-Collector/" + version + " (+https://elixir.poapkings.com/docs/operators)",
+		client:    &http.Client{Timeout: timeoutMs * time.Millisecond},
 	}
 }
 
@@ -79,7 +56,7 @@ func (f *Fetcher) Fetch(ctx context.Context, path string) Result {
 		return Result{Kind: "transport", Message: err.Error()}
 	}
 	req.Header.Set("Authorization", "Bearer "+f.token)
-	req.Header.Set("User-Agent", "Elixir-MCP-Gateway/0.1")
+	req.Header.Set("User-Agent", f.userAgent)
 	res, err := f.client.Do(req)
 	if err != nil {
 		return Result{Kind: "transport", Message: err.Error()}

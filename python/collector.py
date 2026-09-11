@@ -95,7 +95,9 @@ def fetch_cr(cr_token, path, timeout=15):
         CR_BASE + path,
         headers={
             "authorization": f"Bearer {cr_token}",
-            "user-agent": "Elixir-MCP-Gateway/py2",
+            # The real name and the stamped version, as the Go collector
+            # sends: Supercell sees this on every request.
+            "user-agent": f"Elixir-MCP-Collector/{VERSION} (+https://elixir.poapkings.com/docs/operators)",
         },
     )
     try:
