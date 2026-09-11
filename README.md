@@ -217,7 +217,41 @@ running. Building the Go binary yourself is
 
 ## 4. Confirm it's working
 
-The collector writes JSON log lines to standard output; the installer
+**Ask the doctor first.** Both implementations carry a read-only
+preflight that runs five checks and prints one summary — your runtime,
+the `.env` and the shape of both secrets (never their values), what
+Elixir MCP thinks this collector is (identity, lifecycle state, channel,
+clock skew), the public IP your box reaches out from, and one cheap
+Clash Royale read from that IP with your key:
+
+```sh
+./collector doctor            # Go binary
+python3 collector.py --check  # Python twin
+```
+
+The two things that fail most, in words rather than status codes:
+
+```
+✓ elixir        https://elixir.poapkings.com/api/collector
+  identity     Goblin Barrel (oracle-1)
+  state        pending - installed, not yet promoted - the maintainer
+               moves this collector to probation; nothing to fix here
+```
+
+```
+✗ clash_royale  Clash Royale API rejected this key (403 accessDenied.invalidIp)
+  Invalid authorization: API key does not allow access from IP 132.145.0.9
+  your egress IP: 132.145.0.9
+  fix: add 132.145.0.9 to this key's allowed IPs at developer.clashroyale.com
+```
+
+Exit code `0` is healthy, `1` means something on this box or its network
+is broken, `2` means everything here is right and the collector is
+simply not active yet (`pending`, `draining`). `--json` gives the same
+report as a document to paste into an issue. Doctor never leases work, so
+it is safe to run beside a live collector.
+
+Once it is running, the collector writes JSON log lines to standard output; the installer
 routes them to a file (`~/Library/Logs/elixir-mcp-collector.log` on
 macOS; wherever your supervisor captures stdout on Windows/Linux).
 Within a few minutes you'll see a startup line, a `config` line showing

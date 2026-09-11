@@ -100,6 +100,15 @@ makes "no AWS access" a property of the build rather than a promise.
   third-party dependencies (stdlib only) since the SQS path went.
 - `internal/v2/` — the zero-trust client (config/lease/submit, watchdog,
   activity log, update authority).
+- `internal/doctor/` — the operator preflight (`collector doctor
+  [--json]`; Python: `collector.py --check [--json]`). Five read-only
+  checks, all of which run; exit 0 healthy / 1 broken / 2 valid-but-not-
+  yet-active; secrets shown as their last four characters in every mode.
+  It NEVER leases (a diagnostic lease would orphan a real job for its
+  TTL) - it reads `/config`, which since 2026-09-11 answers `pending`
+  tokens, returns 403 `revoked`, echoes `observed_ip`, and names the one
+  CR path (`doctor.cr_path`) doctor may read. Both twins print the same
+  report; `doctor_test.go` and `DoctorTests` pin the same wording.
 - `internal/crapi`, `internal/breaker` — CR API paths + the 403 breaker
   (shared helpers). `internal/worker` (SQS envelopes) and
   `internal/update` (GitHub-polling updater) were DELETED 2026-09-06

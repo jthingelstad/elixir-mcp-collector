@@ -3,6 +3,7 @@
 import base64
 import gzip
 import json
+import time
 import unittest
 
 import collector
@@ -229,3 +230,125 @@ class BreakerConfigParityTests(unittest.TestCase):
             "breaker_open",
             "a config refresh must not hand a stopped collector its fetches back",
         )
+
+
+CR_KEY = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.secretsecretsecret.Zt9c"
+API_TOKEN = "emcg_secretsecretsecretsecret9f2c"
+
+
+def healthy_body(status="active"):
+    return {
+        "pacing_ms": 1500,
+        "gateway": {"name": "oracle-1", "card": "Goblin Barrel", "channel": "bulk", "status": status},
+        "observed_ip": "132.145.0.9",
+        "doctor": {"cr_path": "/locations?limit=1"},
+    }
+
+
+def run_doctor(config=(200, None, None), cr=("http", 200, '{"items":[]}', None),
+               cr_token=CR_KEY, api_token=API_TOKEN, now=None, probed=None):
+    status, body, date = config
+    if body is None and status == 200:
+        body = healthy_body()
+    date = date or email_date(time.time())
+
+    def config_call():
+        if status == "down":
+            raise OSError("connection refused")
+        return status, body or {}, date
+
+    def cr_fetch(path):
+        if probed is not None:
+            probed.append(path)
+        return cr
+
+    return collector.doctor_run(
+        "/x/.env", False, cr_token, api_token, "http://door",
+        config_call=config_call, cr_fetch=cr_fetch, now=now or time.time,
+        host_arch=lambda: "x86_64",
+    )
+
+
+def email_date(ts):
+    import email.utils
+    return email.utils.formatdate(ts, usegmt=True)
+
+
+class DoctorTests(unittest.TestCase):
+    """Mirrors internal/doctor/doctor_test.go: same checks, same words."""
+
+    def test_healthy_box_reads_identity_and_probes_the_server_named_path(self):
+        probed = []
+        r = run_doctor(probed=probed)
+        self.assertEqual((r["verdict"], r["exit"]), ("healthy", 0))
+        self.assertEqual(probed, ["/locations?limit=1"])
+        txt = collector.doctor_text(r)
+        for want in ("Goblin Barrel (oracle-1)", "active - leasing and submitting work",
+                     "132.145.0.9", "skew"):
+            self.assertIn(want, txt)
+
+    def test_secrets_never_appear_in_either_mode(self):
+        r = run_doctor()
+        for out in (collector.doctor_text(r), json.dumps(r, ensure_ascii=False)):
+            for secret in ("secretsecret", CR_KEY, API_TOKEN):
+                self.assertNotIn(secret, out)
+            self.assertIn("…Zt9c", out)
+            self.assertIn("…9f2c", out)
+
+    def test_pending_is_valid_but_not_yet_active(self):
+        r = run_doctor(config=(200, healthy_body("pending"), None))
+        self.assertEqual((r["verdict"], r["exit"]), ("not_yet_active", 2))
+        self.assertIn("not yet promoted", collector.doctor_text(r))
+
+    def test_unknown_and_revoked_tokens_are_told_apart(self):
+        r = run_doctor(config=(401, {"error": "unauthenticated"}, None))
+        self.assertEqual(r["exit"], 1)
+        self.assertIn("does not recognise this token", collector.doctor_text(r))
+        r = run_doctor(config=(403, {"error": "revoked", "hint": "This collector token was revoked by the maintainer; it will never work again."}, None))
+        self.assertEqual(r["exit"], 1)
+        self.assertIn("revoked by the maintainer", collector.doctor_text(r))
+
+    def test_ip_mismatch_names_the_egress_and_the_fix(self):
+        body = '{"reason":"accessDenied.invalidIp","message":"Invalid authorization: API key does not allow access from IP 132.145.0.9"}'
+        r = run_doctor(cr=("http", 403, body, None))
+        txt = collector.doctor_text(r)
+        self.assertEqual(r["exit"], 1)
+        for want in ("rejected this key (403 accessDenied.invalidIp)",
+                     "your egress IP: 132.145.0.9",
+                     "fix: add 132.145.0.9 to this key's allowed IPs"):
+            self.assertIn(want, txt)
+
+    def test_door_down_still_probes_the_key_with_the_default_path(self):
+        probed = []
+        r = run_doctor(config=("down", None, None), probed=probed)
+        self.assertEqual(probed, [collector.DEFAULT_PROBE])
+        self.assertEqual(r["exit"], 1)
+        self.assertIn("unreachable", collector.doctor_text(r))
+
+    def test_every_check_runs_even_when_the_first_fails(self):
+        r = run_doctor(cr_token="")
+        self.assertEqual(len(r["checks"]), 5)
+        self.assertEqual(r["exit"], 1)
+        self.assertIn("missing: CR_API_TOKEN", collector.doctor_text(r))
+        self.assertTrue(r["checks"][2]["ok"], "the Elixir check must still run and pass")
+
+    def test_clock_skew_is_a_warning(self):
+        r = run_doctor(now=lambda: time.time() + 600)
+        self.assertEqual(r["exit"], 0)
+        self.assertIn("fix NTP", collector.doctor_text(r))
+
+    def test_load_env_reports_where_it_looked(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, ".env")
+            os.environ["ELIXIR_MCP_ENV_FILE"] = path
+            try:
+                self.assertEqual(collector.load_env(), (path, False))
+                with open(path, "w") as f:
+                    f.write("DOCTOR_TEST_KEY=1\n")
+                self.assertEqual(collector.load_env(), (path, True))
+                self.assertEqual(os.environ.get("DOCTOR_TEST_KEY"), "1")
+            finally:
+                os.environ.pop("ELIXIR_MCP_ENV_FILE", None)
+                os.environ.pop("DOCTOR_TEST_KEY", None)

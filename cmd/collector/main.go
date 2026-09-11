@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/jthingelstad/elixir-mcp-collector/internal/crapi"
+	"github.com/jthingelstad/elixir-mcp-collector/internal/doctor"
 	"github.com/jthingelstad/elixir-mcp-collector/internal/v2"
 )
 
@@ -38,7 +39,10 @@ func logJSON(level, msg string) {
 
 var envLine = regexp.MustCompile(`^([A-Z0-9_]+)=(.*)$`)
 
-func loadEnv() {
+// loadEnv reads .env beside the binary (or $ELIXIR_MCP_ENV_FILE) into the
+// environment; returns where it looked and whether it found the file, for
+// doctor to report.
+func loadEnv() (string, bool) {
 	envFile := os.Getenv("ELIXIR_MCP_ENV_FILE")
 	if envFile == "" {
 		self, err := os.Executable()
@@ -48,7 +52,7 @@ func loadEnv() {
 	}
 	f, err := os.Open(envFile)
 	if err != nil {
-		return // env-only
+		return envFile, false // env-only
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
@@ -59,6 +63,7 @@ func loadEnv() {
 			}
 		}
 	}
+	return envFile, true
 }
 
 // Exit code 2 means "this configuration will never work" — the
@@ -75,8 +80,46 @@ func required(name string) string {
 	return v
 }
 
+// runDoctor is the read-only preflight (`collector doctor [--json]`): it
+// never leases, and a missing token is a finding here, not exit 2.
+func runDoctor(envPath string, envFound bool, asJSON bool) {
+	base := os.Getenv("ELIXIR_API_BASE")
+	if base == "" {
+		base = "https://elixir.poapkings.com/api/collector"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	crToken := os.Getenv("CR_API_TOKEN")
+	report := doctor.Run(ctx, doctor.Options{
+		Version:  version,
+		EnvPath:  envPath,
+		EnvFound: envFound,
+		CRToken:  crToken,
+		APIToken: os.Getenv("ELIXIR_API_TOKEN"),
+		Base:     base,
+		HTTP:     &http.Client{Timeout: 30 * time.Second},
+		Fetch:    crapi.New(crToken, version).Fetch,
+	})
+	if asJSON {
+		out, _ := json.MarshalIndent(report, "", "  ")
+		fmt.Println(string(out))
+	} else {
+		fmt.Print(doctor.Text(report))
+	}
+	os.Exit(report.Exit)
+}
+
 func main() {
-	loadEnv()
+	envPath, envFound := loadEnv()
+	if len(os.Args) > 1 && os.Args[1] == "doctor" {
+		asJSON := false
+		for _, a := range os.Args[2:] {
+			if a == "--json" {
+				asJSON = true
+			}
+		}
+		runDoctor(envPath, envFound, asJSON)
+	}
 	crToken := required("CR_API_TOKEN")
 	apiToken := required("ELIXIR_API_TOKEN")
 

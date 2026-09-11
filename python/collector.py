@@ -51,18 +51,22 @@ def log(level, msg):
 
 
 def load_env():
+    """Read .env beside this file (or $ELIXIR_MCP_ENV_FILE) into the
+    environment. Returns (path looked at, found) for doctor to report."""
     path = os.environ.get(
         "ELIXIR_MCP_ENV_FILE",
         os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
     )
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+    if not os.path.exists(path):
+        return path, False
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+    return path, True
 
 
 def api(base, token, method, route, body=None, timeout=30):
@@ -240,16 +244,261 @@ class Collector:
                 self.sleep(self.cfg["poll"]["idle_backoff_s"])
 
 
+# ---- doctor: the operator's preflight (collector.py --check [--json]) ----
+#
+# Five read-only checks that say, in one paste, why a box "isn't
+# collecting". Never leases work (a diagnostic lease would orphan a real
+# job for its TTL), never prints a secret (last four characters, in every
+# mode). Same report shape and wording as the Go twin's `collector doctor`;
+# the two are kept in step by hand like the rest of the client.
+
+EXIT_HEALTHY, EXIT_BROKEN, EXIT_NOT_YET_ACTIVE = 0, 1, 2
+# What doctor reads from the CR API when the door could not designate a
+# probe; the door's doctor.cr_path wins.
+DEFAULT_PROBE = "/locations?limit=1"
+STATE_TEXT = {
+    "pending": "installed, not yet promoted - the maintainer moves this collector to probation; nothing to fix here",
+    "probation": "leasing work; the maintainer activates it after watching it run",
+    "active": "leasing and submitting work",
+    "draining": "finishing what it holds and leasing nothing new - the maintainer is retiring it, or it was quarantined for expired leases; ask them",
+}
+
+
+def _tail4(s):
+    return "…" + s[-4:] if len(s) > 4 else "…"
+
+
+def _check(name, ok=False, detail="", warn=False, lines=None, fix="", fields=None):
+    c = {"name": name, "ok": ok, "detail": detail}
+    if warn:
+        c["warn"] = True
+    if lines:
+        c["lines"] = lines
+    if fix:
+        c["fix"] = fix
+    if fields:
+        c["fields"] = fields
+    return c
+
+
+def _host_arch():
+    import platform
+    return platform.machine()
+
+
+def doctor_run(env_path, env_found, cr_token, api_token, base,
+               config_call=None, cr_fetch=None, now=time.time, host_arch=_host_arch):
+    """Every check runs; returns the report dict. config_call() -> (status,
+    body, date_header) and cr_fetch(path) are injectable for tests."""
+    import platform
+    checks = []
+
+    # 1. runtime
+    py = platform.python_version()
+    arch = host_arch()
+    ok = sys.version_info >= (3, 8)
+    checks.append(_check("runtime", ok=ok,
+                         detail=f"python {py} {sys.platform}/{arch}",
+                         fix="" if ok else "Python 3.8 or newer is required"))
+
+    # 2. config file and the shape of the two secrets
+    fields, lines, warn, fix = {}, [], False, ""
+    if env_found:
+        detail = env_path
+        if os.name != "nt":
+            mode = os.stat(env_path).st_mode & 0o777
+            detail += f" (mode {mode:o})"
+            if mode & 0o077:
+                warn, fix = True, f"chmod 600 {env_path} - it holds two secrets"
+    else:
+        detail = f"no .env found at {env_path}; reading environment variables only"
+    missing = []
+    if not cr_token:
+        missing.append("CR_API_TOKEN")
+    else:
+        fields["cr_api_token"] = _tail4(cr_token)
+        if cr_token.count(".") != 2 or not cr_token.startswith("eyJ"):
+            warn = True
+            lines.append("CR_API_TOKEN does not look like a Clash Royale key (they are JWTs: three dot-separated parts starting eyJ)")
+    if not api_token:
+        missing.append("ELIXIR_API_TOKEN")
+    else:
+        fields["elixir_api_token"] = _tail4(api_token)
+        if not api_token.startswith("emcg_"):
+            warn = True
+            lines.append("ELIXIR_API_TOKEN does not start with emcg_ - collector tokens do; a service token (svt_) or agent token is a different door")
+    ok = not missing
+    if missing:
+        lines.append("missing: " + ", ".join(missing))
+        fix = "put both keys in .env beside collector.py (README, step 2)"
+    checks.append(_check("config", ok=ok, detail=detail, warn=warn, lines=lines, fix=fix, fields=fields))
+
+    # 3. the door: identity, state, channel, clock skew
+    cfg = None
+    fields, lines, warn, fix, ok = {}, [], False, "", False
+    detail = base
+    if not api_token:
+        detail += " - skipped, no ELIXIR_API_TOKEN"
+    else:
+        call = config_call or (lambda: _config_with_date(base, api_token))
+        try:
+            status, body, date_header = call()
+        except Exception as e:  # noqa: BLE001 - unreachable is a finding
+            status, body, date_header = None, {}, None
+            detail += f" - unreachable: {e}"
+            fix = "this box needs outbound HTTPS to elixir.poapkings.com"
+        if date_header:
+            try:
+                import email.utils
+                server = email.utils.parsedate_to_datetime(date_header).timestamp()
+                skew = now() - server
+                fields["skew_s"] = f"{skew:.1f}"
+                if abs(skew) > 30:
+                    warn = True
+                    lines.append(f"clock is {skew:.0f}s off the server's - fix NTP")
+            except Exception:  # noqa: BLE001 - an unparseable Date is not a finding
+                pass
+        if status == 200:
+            ok, cfg = True, body
+            gw = body.get("gateway", {})
+            fields.update(name=gw.get("name", ""), card=gw.get("card") or "",
+                          channel=gw.get("channel", ""), status=gw.get("status", ""),
+                          state=STATE_TEXT.get(gw.get("status", ""), ""))
+        elif status == 401:
+            detail += " - the door does not recognise this token"
+            lines.append("a typo, a token from another machine, or one that was never claimed on the Collectors page")
+            fix = "copy the token again from Status > Collectors (a staged token expires unclaimed after 72 hours)"
+        elif status == 403:
+            detail += f" - {body.get('error', '')}"
+            if body.get("hint"):
+                lines.append(body["hint"])
+        elif status == 429:
+            detail += " - config budget spent for this hour (120/hour)"
+            lines.append("a running collector reads config once an hour; something on this token is calling it far more often")
+        elif status is not None:
+            detail += f" - HTTP {status} {body.get('error', '')}"
+    checks.append(_check("elixir", ok=ok, detail=detail, warn=warn, lines=lines, fix=fix, fields=fields))
+
+    # 4. egress IP, as the door saw it
+    egress = (cfg or {}).get("observed_ip") or ""
+    if egress:
+        checks.append(_check("egress", ok=True, fields={"ip": egress},
+                             detail=f"{egress} (this box, as the door saw it - the address to allowlist on the Clash Royale key)"))
+    else:
+        checks.append(_check("egress", detail="unknown - the door did not answer, so nothing saw this box from outside"))
+
+    # 5. one CR read from this IP, on the server-named path
+    fields, lines, fix, ok, warn = {}, [], "", False, False
+    if not cr_token:
+        detail = "skipped, no CR_API_TOKEN"
+    else:
+        path = (cfg or {}).get("doctor", {}).get("cr_path") or DEFAULT_PROBE
+        fields["path"] = path
+        fetch = cr_fetch or (lambda p: fetch_cr(cr_token, p))
+        kind, status, body_text, _ = fetch(path)
+        shown = egress or "unknown"
+        if kind != "http":
+            detail = "api.clashroyale.com unreachable"
+            fix = "this box needs outbound HTTPS to api.clashroyale.com"
+        else:
+            fields["status"] = str(status)
+            if status == 200:
+                ok, detail = True, f"key works from {shown} (GET {path} -> 200)"
+            elif status == 403:
+                try:
+                    body = json.loads(body_text or "{}")
+                except ValueError:
+                    body = {}
+                reason, message = body.get("reason", ""), body.get("message", "")
+                detail = f"Clash Royale API rejected this key (403 {reason})"
+                if message:
+                    lines.append(message)
+                if "invalidIp" in reason or "IP" in message:
+                    lines.append(f"your egress IP: {shown}")
+                    fix = f"add {shown} to this key's allowed IPs at developer.clashroyale.com (or create a key with it)"
+                else:
+                    fix = "check the key at developer.clashroyale.com - this one is not accepted at all"
+            elif status == 429:
+                ok, warn, detail = True, True, "key works, but the API is throttling it right now (429)"
+            else:
+                detail = f"GET {path} -> HTTP {status}"
+    checks.append(_check("clash_royale", ok=ok, detail=detail, warn=warn, lines=lines, fix=fix, fields=fields))
+
+    if not all(c["ok"] for c in checks):
+        verdict, code = "broken", EXIT_BROKEN
+    elif cfg and cfg.get("gateway", {}).get("status") in ("pending", "draining"):
+        verdict, code = "not_yet_active", EXIT_NOT_YET_ACTIVE
+    else:
+        verdict, code = "healthy", EXIT_HEALTHY
+    import platform as _pl
+    return {
+        "client": {"impl": "python", "version": VERSION, "os": sys.platform, "arch": _pl.machine()},
+        "checks": checks,
+        "verdict": verdict,
+        "exit": code,
+    }
+
+
+def _config_with_date(base, token):
+    """GET /config keeping the Date header (clock skew); a 4xx is an answer."""
+    req = urllib.request.Request(
+        base + "/config",
+        headers={"authorization": f"Bearer {token}", "x-collector-version": VERSION},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as res:
+            return res.status, json.loads(res.read().decode() or "{}"), res.headers.get("date")
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read().decode() or "{}")
+        except Exception:  # noqa: BLE001
+            body = {}
+        return e.code, body, e.headers.get("date")
+
+
+def doctor_text(report):
+    c = report["client"]
+    out = [f"Elixir MCP Collector doctor ({c['impl']} {c['version']}, {c['os']}/{c['arch']})", ""]
+    for ch in report["checks"]:
+        mark = "✓" if ch["ok"] and not ch.get("warn") else ("!" if ch["ok"] else "✗")
+        out.append(f"{mark} {ch['name']:<13} {ch['detail']}")
+        f = ch.get("fields", {})
+        if ch["name"] == "config":
+            for k in ("cr_api_token", "elixir_api_token"):
+                if k in f:
+                    out.append(f"  {k.upper():<16} {f[k]}")
+        if ch["name"] == "elixir":
+            if ch["ok"]:
+                out.append(f"  {'identity':<12} {f['card']} ({f['name']})")
+                out.append(f"  {'state':<12} {f['status']} - {f['state']}")
+                out.append(f"  {'channel':<12} {f['channel']}")
+            if "skew_s" in f:
+                out.append(f"  {'server time':<12} skew {f['skew_s']}s")
+        for line in ch.get("lines", []):
+            out.append(f"  {line}")
+        if ch.get("fix"):
+            out.append(f"  fix: {ch['fix']}")
+    out += ["", report["verdict"].replace("_", " ")]
+    return "\n".join(out) + "\n"
+
+
 def main():
-    load_env()
+    env_path, env_found = load_env()
     cr_token = os.environ.get("CR_API_TOKEN")
     api_token = os.environ.get("ELIXIR_API_TOKEN")
-    if not cr_token or not api_token:
-        log("error", "CR_API_TOKEN and ELIXIR_API_TOKEN are required")
-        sys.exit(2)
     base = os.environ.get(
         "ELIXIR_API_BASE", "https://elixir.poapkings.com/api/collector"
     )
+    if "--check" in sys.argv[1:]:
+        report = doctor_run(env_path, env_found, cr_token, api_token, base)
+        if "--json" in sys.argv[1:]:
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+        else:
+            print(doctor_text(report), end="")
+        sys.exit(report["exit"])
+    if not cr_token or not api_token:
+        log("error", "CR_API_TOKEN and ELIXIR_API_TOKEN are required")
+        sys.exit(2)
     log("info", f"gateway up (python, zero-trust v2) version={VERSION}")
     Collector(base, api_token, cr_token).run()
 
