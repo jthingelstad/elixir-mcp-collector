@@ -88,13 +88,82 @@ func TestV2LeaseFetchSubmit(t *testing.T) {
 		t.Fatalf("body not base64: %v", err)
 	}
 
-	// Second poll: empty response on a bulk channel is just empty.
+	if s["api_bytes"] != float64(len(`{"tag":"#20JJJ2CCRU"}`)) {
+		t.Fatalf("api_bytes should be the raw body length: %+v", s["api_bytes"])
+	}
+
+	// Second poll: empty, and no next_check_in_s from this door, so the
+	// config's idle backoff is the wait.
 	out2, err := c.PollOnce(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if out2.State != "empty" {
 		t.Fatalf("expected empty, got %s", out2.State)
+	}
+	if out2.Wait != 1*time.Second {
+		t.Fatalf("expected the idle backoff, got %s", out2.Wait)
+	}
+}
+
+// Check-ins, not polling (2026-09-11): the lease request carries no wait,
+// and the door's next_check_in_s is the wait the loop takes - 0 after a
+// granted job (more may remain), the idle interval on empty.
+func TestV2CheckInFollowsTheDoor(t *testing.T) {
+	var leaseBodies []map[string]any
+	calls := 0
+	door := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/config"):
+			_, _ = w.Write([]byte(`{"pacing_ms":1,"breaker":{"threshold_403":5,"cooldown_s":1},
+				"overflow_bytes":250000,"poll":{"live_wait_s":8,"bulk_wait_s":2,"idle_backoff_s":20},
+				"min_client_version":"2.0.0","gateway":{"name":"t","channel":"bulk","status":"active"},"update":{}}`))
+		case strings.HasSuffix(r.URL.Path, "/lease"):
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			leaseBodies = append(leaseBodies, body)
+			calls++
+			switch calls {
+			case 1:
+				_, _ = w.Write([]byte(`{"job":{"endpoint":"player","entity_key":"#20JJJ2CCRU","lane":"live"},
+					"cr_path":"/players/%2320JJJ2CCRU","lease":"1","next_check_in_s":0}`))
+			case 2:
+				_, _ = w.Write([]byte(`{"empty":true,"next_check_in_s":15}`))
+			default:
+				w.WriteHeader(429)
+				_, _ = w.Write([]byte(`{"error":"lease_cap","next_check_in_s":5}`))
+			}
+		case strings.HasSuffix(r.URL.Path, "/submit"):
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}
+	}))
+	defer door.Close()
+	c := &Client{
+		Base: door.URL, Token: "emcg_test", Version: "dev", HTTP: door.Client(),
+		Fetch: func(_ context.Context, path string) crapi.Result {
+			return crapi.Result{Kind: "http", Status: 200, BodyText: `{}`}
+		},
+		Log: func(string, string) {}, Now: time.Now, Sleep: func(time.Duration) {},
+	}
+	if err := c.LoadConfig(false); err != nil {
+		t.Fatal(err)
+	}
+	job, _ := c.PollOnce(context.Background())
+	if job.State != "job" || job.Wait != 0 {
+		t.Fatalf("a granted job says come straight back: %+v", job)
+	}
+	empty, _ := c.PollOnce(context.Background())
+	if empty.State != "empty" || empty.Wait != 15*time.Second {
+		t.Fatalf("empty follows the door's interval: %+v", empty)
+	}
+	refused, _ := c.PollOnce(context.Background())
+	if refused.State != "refused" || refused.Wait != 5*time.Second {
+		t.Fatalf("a refusal follows the door's interval too: %+v", refused)
+	}
+	for _, b := range leaseBodies {
+		if _, has := b["wait_s"]; has {
+			t.Fatalf("a check-in never asks the door to wait: %+v", b)
+		}
 	}
 }
 

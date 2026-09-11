@@ -30,9 +30,11 @@ makes "no AWS access" a property of the build rather than a promise.
    public remote — `.gitignore` now ignores all `.env.*` except
    `.env.example`. Rotate on any exposure.)
 2. **The server owns the contract AND the behavior.** The clients speak
-   config/lease/submit; the server computes each CR path, assigns the
-   channel (bulk for operators, live for owner machines), and hands out
-   pacing/breaker/backoff at launch. Collection changes never require a
+   config/lease/submit; the server computes each CR path, says when to
+   check in again (`next_check_in_s` on every lease answer; since
+   2026-09-11 a collector never asks the door to wait, and every
+   collector serves priority work first - there is no live channel), and
+   hands out pacing/breaker/backoff at launch. Collection changes never require a
    client change. The queue/API contract is canonical in
    `jthingelstad/elixir-mcp` (`packages/contracts`); this repo's tests
    pin the shapes it produces so drift fails here first, and a contract
@@ -161,7 +163,7 @@ makes "no AWS access" a property of the build rather than a promise.
 ## Local services on this host
 
 Jamie's machine runs the v2 pair, card identities Ram Rider (Go) and
-Tesla (Python), both on the `live` channel. **Neither runs out of this
+Tesla (Python). **Neither runs out of this
 checkout any more** (2026-09-06): both were moved to released artifacts
 under `~/elixir-collectors/<name>/`, each with its own `.env` beside it,
 so editing this repo cannot reach a live collector.

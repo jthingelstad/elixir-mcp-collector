@@ -75,11 +75,40 @@ class V2Tests(unittest.TestCase):
         self.assertEqual(json.loads(body)["tag"], "#20JJJ2CCRU")
 
     def test_empty_and_refused(self):
-        c, _ = make([(200, CONFIG), (200, {"empty": True}), (429, {"error": "lease_cap"})],
-                    lambda p: ("http", 200, "{}", None))
+        c, calls = make([(200, CONFIG), (200, {"empty": True}), (429, {"error": "lease_cap"})],
+                        lambda p: ("http", 200, "{}", None))
         c.load_config()
         self.assertEqual(c.poll_once(), "empty")
+        self.assertEqual(c.next_wait, 1, "a door that says nothing: the idle backoff")
         self.assertEqual(c.poll_once(), "refused")
+        self.assertEqual(c.next_wait, 1)
+
+    def test_check_in_follows_the_door(self):
+        # Check-ins, not polling (2026-09-11): no wait_s in the request, and
+        # next_check_in_s is the wait - 0 after a job, the interval on empty.
+        c, calls = make(
+            [
+                (200, CONFIG),
+                (200, {"job": {"endpoint": "player", "entity_key": "#20JJJ2CCRU", "lane": "live"},
+                       "cr_path": "/players/%2320JJJ2CCRU", "lease": "1", "next_check_in_s": 0}),
+                (200, {"ok": True}),
+                (200, {"empty": True, "next_check_in_s": 15}),
+                (429, {"error": "lease_cap", "next_check_in_s": 5}),
+            ],
+            lambda p: ("http", 200, '{"tag":"#20JJJ2CCRU"}', None),
+        )
+        c.load_config()
+        self.assertEqual(c.poll_once(), "job")
+        self.assertEqual(c.next_wait, 0, "more may remain: straight back")
+        submit = [b for m, r, b in calls if (m, r) == ("POST", "/submit")][-1]
+        self.assertEqual(submit["api_bytes"], len('{"tag":"#20JJJ2CCRU"}'))
+        self.assertEqual(c.poll_once(), "empty")
+        self.assertEqual(c.next_wait, 15)
+        self.assertEqual(c.poll_once(), "refused")
+        self.assertEqual(c.next_wait, 5)
+        for m, r, b in calls:
+            if r == "/lease":
+                self.assertNotIn("wait_s", b, "a check-in never asks the door to wait")
 
     def test_submit_retries_a_transient_server_failure_with_same_lease(self):
         c, calls = make(

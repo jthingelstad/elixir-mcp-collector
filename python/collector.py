@@ -166,6 +166,7 @@ class Collector:
         self.last_fetch_started = 0.0
         self.consecutive_403 = 0
         self.breaker_open_until = 0.0
+        self.next_wait = 0  # seconds until the next check-in, as the door said
         self.jobs_done = 0
         self.fetch_errors = 0
 
@@ -187,14 +188,18 @@ class Collector:
         if self.now() < self.breaker_open_until:
             self.sleep(self.cfg["breaker"]["cooldown_s"])
             return "breaker_open"
-        channel = self.cfg["gateway"]["channel"]
-        wait = self.cfg["poll"]["live_wait_s" if channel == "live" else "bulk_wait_s"]
-        status, lease = self.api("POST", "/lease", {"wait_s": wait})
+        # Check-ins, not polling (2026-09-11): never ask the door to wait;
+        # it says when to come back (next_check_in_s), and run() sleeps
+        # that long. A door older than the contract says nothing, and the
+        # config's idle backoff stands.
+        status, lease = self.api("POST", "/lease", {})
+        idle = self.cfg["poll"]["idle_backoff_s"]
         if status in (401, 409, 429):
             log("warn", f"lease refused HTTP {status} {lease.get('error', '')}")
-            self.sleep(self.cfg["poll"]["idle_backoff_s"])
+            self.next_wait = self._next_wait(lease, idle)
             return "refused"
         if lease.get("empty") or not lease.get("lease"):
+            self.next_wait = self._next_wait(lease, idle)
             return "empty"
 
         self.pace()
@@ -215,6 +220,9 @@ class Collector:
         submit = {"lease": lease["lease"], "fetched_at": fetched_at}
         overflow = False
         if kind == "http" and http_status == 200:
+            # What the API handed us before any filter, so the hub can say
+            # what the edge saved (2026-09-11).
+            submit["api_bytes"] = len(body_text.encode())
             # Drop what the hub already holds, and say how much that was.
             after = (lease.get("filter") or {}).get("battles_after")
             if after:
@@ -253,7 +261,16 @@ class Collector:
         # An overflow is a lost fetch and counts as one in the summary.
         if overflow or not (kind == "http" and http_status == 200):
             self.fetch_errors += 1
+        # There may be more: the door said so when it granted this one.
+        self.next_wait = self._next_wait(lease, 0)
         return "job"
+
+    @staticmethod
+    def _next_wait(lease, fallback_s):
+        v = (lease or {}).get("next_check_in_s")
+        if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+            return v
+        return fallback_s
 
     def submit_with_retry(self, submit):
         """Retry only transient submit failures without abandoning the lease."""
@@ -315,8 +332,8 @@ class Collector:
                 log("warn", f"poll error: {e}")
                 self.sleep(10)
                 continue
-            if outcome == "empty" and self.cfg["gateway"]["channel"] != "live":
-                self.sleep(self.cfg["poll"]["idle_backoff_s"])
+            if self.next_wait > 0:
+                self.sleep(self.next_wait)
 
 
 # ---- doctor: the operator's preflight (collector.py --check [--json]) ----

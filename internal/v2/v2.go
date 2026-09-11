@@ -64,8 +64,12 @@ type lease struct {
 	// What the hub asks us to drop before submitting (2026-09-11): for a
 	// battlelog, everything at or before the newest battle it holds.
 	Filter *filter.Filter `json:"filter"`
-	Error  string         `json:"error"`
-	Hint   string         `json:"hint"`
+	// When to check in again (2026-09-11): 0 while work remains for us,
+	// the idle interval otherwise. Absent from a door older than the
+	// check-in contract, in which case the config's idle backoff stands.
+	NextCheckInS *int   `json:"next_check_in_s"`
+	Error        string `json:"error"`
+	Hint         string `json:"hint"`
 }
 
 type Client struct {
@@ -262,31 +266,40 @@ func (c *Client) pace() {
 
 type Outcome struct {
 	State string // "empty" | "job" | "breaker_open" | "refused"
+	// How long to wait before the next check-in: what the door said, or
+	// the config's idle backoff when it said nothing. Zero means now.
+	Wait time.Duration
 }
 
-// PollOnce leases one job, fetches it from the CR API, and submits the
-// result. The heartbeat is the calls themselves.
+// nextWait reads the door's next_check_in_s, falling back to the config's
+// idle backoff for a door that predates check-ins.
+func (c *Client) nextWait(l *lease, fallbackS int) time.Duration {
+	if l != nil && l.NextCheckInS != nil && *l.NextCheckInS >= 0 {
+		return time.Duration(*l.NextCheckInS) * time.Second
+	}
+	return time.Duration(fallbackS) * time.Second
+}
+
+// PollOnce checks in once: leases a job if the door has one, fetches it
+// from the CR API, and submits the result. The heartbeat is the calls
+// themselves. It never asks the door to wait (2026-09-11: check-ins, not
+// polling) - the door says when to come back, and Run sleeps that long.
 func (c *Client) PollOnce(ctx context.Context) (Outcome, error) {
 	if c.brk.IsOpen() {
 		c.Sleep(time.Duration(c.cfg.Breaker.CooldownS) * time.Second)
 		return Outcome{State: "breaker_open"}, nil
 	}
-	wait := c.cfg.Poll.BulkWaitS
-	if c.cfg.Gateway.Channel == "live" {
-		wait = c.cfg.Poll.LiveWaitS
-	}
 	var l lease
-	status, err := c.call("POST", "/lease", map[string]int{"wait_s": wait}, &l)
+	status, err := c.call("POST", "/lease", map[string]any{}, &l)
 	if err != nil {
 		return Outcome{}, err
 	}
 	if status == 429 || status == 409 || status == 401 {
 		c.Log("warn", fmt.Sprintf("lease refused HTTP %d %s %s", status, l.Error, l.Hint))
-		c.Sleep(time.Duration(c.cfg.Poll.IdleBackoffS) * time.Second)
-		return Outcome{State: "refused"}, nil
+		return Outcome{State: "refused", Wait: c.nextWait(&l, c.cfg.Poll.IdleBackoffS)}, nil
 	}
 	if l.Empty || l.Lease == "" {
-		return Outcome{State: "empty"}, nil
+		return Outcome{State: "empty", Wait: c.nextWait(&l, c.cfg.Poll.IdleBackoffS)}, nil
 	}
 
 	c.pace()
@@ -312,6 +325,9 @@ func (c *Client) PollOnce(ctx context.Context) (Outcome, error) {
 	submit := map[string]any{"lease": l.Lease, "fetched_at": fetchedAt}
 	overflow := false
 	if fetched.Kind == "http" && fetched.Status == 200 {
+		// What the API handed us before any filter, so the hub can say
+		// what the edge saved (2026-09-11).
+		submit["api_bytes"] = len(fetched.BodyText)
 		// Drop what the hub already holds, and say how much that was.
 		// The body stays the API's array; only the entries change.
 		if l.Filter != nil && l.Filter.BattlesAfter != "" {
@@ -370,7 +386,8 @@ func (c *Client) PollOnce(ctx context.Context) (Outcome, error) {
 	if overflow || !(fetched.Kind == "http" && fetched.Status == 200) {
 		c.fetchErrors++
 	}
-	return Outcome{State: "job"}, nil
+	// There may be more: the door said so when it granted this one.
+	return Outcome{State: "job", Wait: c.nextWait(&l, 0)}, nil
 }
 
 // maxRawBytes is the raw-response safety ceiling, distinct from the
@@ -379,9 +396,9 @@ func (c *Client) PollOnce(ctx context.Context) (Outcome, error) {
 // what we are willing to gzip.
 const maxRawBytes = 8 << 20
 
-// Run is the forever loop: config, then lease/fetch/submit with idle
-// backoff on bulk; live channels rely on the server-side long poll so
-// an empty response just loops again.
+// Run is the forever loop: config, then check in / fetch / submit, and
+// sleep exactly as long as the door said before checking in again. No
+// channel-specific behaviour: every collector serves priority work.
 func (c *Client) Run(ctx context.Context) error {
 	if err := c.LoadConfig(true); err != nil {
 		return err
@@ -421,8 +438,8 @@ func (c *Client) Run(ctx context.Context) error {
 			c.Sleep(10 * time.Second)
 			continue
 		}
-		if out.State == "empty" && c.cfg.Gateway.Channel != "live" {
-			c.Sleep(time.Duration(c.cfg.Poll.IdleBackoffS) * time.Second)
+		if out.Wait > 0 {
+			c.Sleep(out.Wait)
 		}
 	}
 	return ctx.Err()
