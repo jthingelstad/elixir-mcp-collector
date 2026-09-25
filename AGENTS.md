@@ -38,9 +38,10 @@ candidates soak as a dev build (rule 8).
    `.env.example`. Rotate on any exposure.)
 2. **The server owns the contract AND the behavior.** The client speaks
    config/lease/submit; the server computes each CR path, says when to
-   check in again (`next_check_in_s` on every lease answer; since
-   2026-09-11 a collector never asks the door to wait, and every
-   collector serves priority work first - there is no live channel), and
+   check in again (`next_check_in_s` on every lease grant, empty
+   answer and lease-cap refusal; since 2026-09-11 a collector never
+   asks the door to wait, and every collector serves priority work
+   first - there is no live channel), and
    hands out pacing/breaker/backoff at launch. Collection changes never require a
    client change. The queue/API contract is canonical in
    `jthingelstad/elixir-mcp` (`packages/contracts`); this repo's tests
@@ -61,13 +62,21 @@ candidates soak as a dev build (rule 8).
    and hourly after, so naming a version reaches the fleet within the
    hour. There is NO pin and no opt-out, deliberately: the fleet shares
    one rate budget and one contract, so a stale client is everyone's
-   problem. Do not add a pin flag. Dev builds cannot self-update; their
-   operators update when asked. `min_client_version` is parsed from
-   `/config` and NOT enforced by the client, which is the obvious lever
-   if a stale client ever needs refusing. (The `collector_release` rows
-   the config endpoint serves are populated server-side; until they are,
-   released binaries simply don't auto-update - that's safe.)
-   Cross-platform: release.yml
+   problem. Do not add a pin flag, not even one for canaries (Jamie,
+   2026-09-25; rule 8 says how a candidate soaks). Dev builds cannot
+   self-update; their operators update when asked. Refusing a stale
+   client is the hub's job, not the client's: its `CollectorMinEnforce`
+   stack parameter makes the door answer `lease` and `submit` with 426
+   `client_too_old` below `min_client_version`. It never refuses
+   `config` (the channel a stale client updates through) and fails open
+   on a version it cannot parse (`dev`), deliberately; neither property
+   is to be "fixed" (elixir-mcp `docs/DECISIONS.md`, "Releases are
+   candidates until named"). The client does not enforce
+   `min_client_version`. The `update` block `/config` serves is the
+   hub's `collector_release` ledger, one row per platform, written when
+   the maintainer names a release (elixir-mcp
+   `infra/scripts/name-collector-release.mjs`; procedure in
+   `docs/RELEASING-COLLECTOR.md`). Cross-platform: release.yml
    builds macOS (arm64/amd64), Windows (amd64/arm64), and Linux
    (amd64/arm64/armv7). Windows self-update renames the running .exe
    aside (can't overwrite a locked binary) and cleans the `.old` at next
@@ -129,10 +138,11 @@ candidates soak as a dev build (rule 8).
   CR path (`doctor.cr_path`) doctor may read. `doctor_test.go` pins the
   report's wording.
 - `internal/filter/` — what a lease asks the collector to drop before
-  submitting (2026-09-11): `filter.battles_after` on a battlelog lease
-  is the newest battleTime the hub holds, in the API's own spelling;
-  `Battlelog()` keeps the entries after it (string compare, never a
-  date parse), returns observed/filtered counts, and leaves a non-array
+  submitting (2026-09-11): `filter.battles_after` on a bulk-lane
+  battlelog lease (never a live one) is the newest battleTime the hub
+  holds, in the API's own spelling; `Battlelog()` keeps the entries
+  after it (string compare, never a date parse), returns
+  observed/filtered counts, and leaves a non-array
   body untouched so the hub still sees what the API said. The submit
   carries `observed` and `filtered` beside `fetched_at`; the body stays
   the API's array. The hub filters under its own mark regardless, so a

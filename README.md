@@ -15,10 +15,10 @@ result back. It never chooses its own targets and never sees any user's
 private data — only public game data.
 
 **Zero trust by design.** A collector holds exactly two secrets: your
-Clash Royale API key and a bearer token Elixir MCP issues you. It talks
-to **three HTTPS endpoints and nothing else** — no AWS credentials, no
-database, no cloud access of any kind. The Go binary has no third-party
-dependencies at all: it is the Go standard library and nothing else. Elixir MCP tells the running
+Clash Royale API key and a bearer token Elixir MCP issues you. Its only
+way into Elixir MCP is **three HTTPS endpoints** (config, lease,
+submit) — no AWS credentials, no database, no cloud access of any
+kind. The Go binary has no third-party dependencies at all: it is the Go standard library and nothing else. Elixir MCP tells the running
 collector what to fetch (it even computes the exact API path), so the
 service can change what it collects without you ever updating anything.
 More collectors mean resilience, never a bigger rate budget: the whole
@@ -239,10 +239,11 @@ fetch rate) also shows on <https://elixir.poapkings.com/data/status>.
 
 ## Lifecycle
 
-`pending` → the maintainer provisions your token → `probation` (it does
-real work immediately) → after a few clean days, `active`. `draining`
-means no new work (planned retirement or a tripped safety breaker);
-`revoked` means the token no longer works. Revoking is instant and is
+`pending` (your token already works: `/config` and the doctor answer,
+but no work is leased yet) → the maintainer promotes it to `probation`
+(it does real work immediately) → after a few clean days, `active`.
+`draining` means no new work (planned retirement or a tripped safety
+breaker); `revoked` means the token no longer works. Revoking is instant and is
 the only thing needed to remove a collector — there is no cloud account
 to tear down.
 
@@ -333,7 +334,9 @@ is expected to update it when asked.
   compressed); a genuine overflow is submitted as a structured error and
   counted as a lost fetch in the activity summary.
 - On a transport failure or server 5xx while submitting, it retries the
-  same lease within the server-supplied lease budget; a 4xx remains a refusal.
+  same lease within the server-supplied retry budget, which stays inside
+  the lease's 90-second lifetime; a 4xx remains a refusal. A lease that
+  is never submitted expires and the job goes back to the queue.
 - When a lease carries a filter (a battlelog lease names the newest
   battle Elixir MCP already holds for that player), it drops the entries
   at or before it before submitting and reports how many it saw and
