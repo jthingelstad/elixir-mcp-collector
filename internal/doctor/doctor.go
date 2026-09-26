@@ -2,9 +2,6 @@
 // say, in one paste, why a box "isn't collecting". It never leases work
 // (a diagnostic lease would orphan a real job for its TTL) and never
 // prints a secret - the last four characters, in every mode.
-//
-// The Python twin (collector.py --check) produces the same report; the
-// two are kept in step by hand, like the rest of the client.
 package doctor
 
 import (

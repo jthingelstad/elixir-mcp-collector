@@ -75,11 +75,6 @@ server names, so pinning costs you nothing in currency.
 
 ## Variations
 
-- **Python instead of the Go binary.** Set `ExecStart=/usr/bin/python3
-  /opt/elixir-collector/collector.py` and replace the installer line
-  with the release download from the README ("Prefer Python"). Know
-  that the Python twin never self-updates; on a box nobody logs into,
-  the Go binary is the better default.
 - **Rebuilding.** Destroy the VM, keep the reserved IP, paste the same
   YAML. Nothing on the Elixir side changes: same token, same identity.
 - **Removing a collector.** Ask the maintainer to revoke the token (or

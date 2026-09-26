@@ -83,40 +83,37 @@ else
   no "finds the binary in the working directory" "$out"
 fi
 
-# --- 4. no binary, no Python worker: exit non-zero with a real message ---
+# --- 4. no binary: exit non-zero with a real message ---
 d="$TMP/empty"
 mkdir -p "$d"
 cp "$TARGET" "$d/run-forever.sh"
 out="$( (cd "$d" && "$SH" "$d/run-forever.sh" --check) 2>&1 )"
 code=$?
 if [ "$code" -ne 0 ]; then
-  ok "no worker anywhere exits non-zero"
+  ok "no binary anywhere exits non-zero"
 else
-  no "no worker anywhere exits non-zero" "exit $code"
+  no "no binary anywhere exits non-zero" "exit $code"
 fi
-if contains "no collector binary found near" "$out" && contains "no Python worker present" "$out"; then
-  ok "no worker anywhere names the paths it checked"
+if contains "no collector binary found near $d/collector" "$out" && contains "scripts/install.sh" "$out"; then
+  ok "no binary anywhere names the paths it checked and the fix"
 else
-  no "no worker anywhere names the paths it checked" "$out"
+  no "no binary anywhere names the paths it checked and the fix" "$out"
 fi
 
-# --- 5. Python twin when there is no binary ---
+# --- 5. a leftover collector.py is not a worker (Python retired 2026-09-26) ---
+# The loop used to fall back to the Python twin. A box that still has
+# one must hear that there is no binary, not run the retired script.
 d="$TMP/pyonly"
 mkdir -p "$d/python"
 cp "$TARGET" "$d/run-forever.sh"
 : > "$d/python/collector.py"
+: > "$d/collector.py"
 out="$( (cd "$TMP" && "$SH" "$d/run-forever.sh" --check) 2>&1 )"
-if contains "would run Python worker" "$out"; then
-  ok "falls back to the Python twin when it exists"
-else
-  no "falls back to the Python twin when it exists" "$out"
-fi
-out="$( (cd "$TMP" && PYTHON_BIN=definitely-not-a-real-python "$SH" "$d/run-forever.sh" --check) 2>&1 )"
 code=$?
-if [ "$code" -ne 0 ] && contains "not on PATH" "$out"; then
-  ok "Python twin with no interpreter fails fast"
+if [ "$code" -ne 0 ] && contains "no collector binary found near" "$out"; then
+  ok "a Python twin alone is not run"
 else
-  no "Python twin with no interpreter fails fast" "exit $code: $out"
+  no "a Python twin alone is not run" "exit $code: $out"
 fi
 
 # --- 6. unwritable log fails fast instead of looping ---
@@ -177,9 +174,9 @@ cp "$TARGET" "$d/run-forever.sh"
 ( cd "$d" && "$SH" "$d/run-forever.sh" >/dev/null 2>&1 )
 log="$(cat "$d/collector.log" 2>/dev/null || true)"
 if contains "no collector binary found near" "$log"; then
-  ok "no-worker failure is mirrored into the log beside the script"
+  ok "no-binary failure is mirrored into the log beside the script"
 else
-  no "no-worker failure is mirrored into the log beside the script" "$log"
+  no "no-binary failure is mirrored into the log beside the script" "$log"
 fi
 
 d="$TMP/mirror2"
@@ -188,9 +185,9 @@ cp "$TARGET" "$d/run-forever.sh"
 ( cd "$TMP" && "$SH" "$d/run-forever.sh" "$d/logs/my.log" >/dev/null 2>&1 )
 log="$(cat "$d/logs/my.log" 2>/dev/null || true)"
 if contains "no collector binary found near" "$log"; then
-  ok "no-worker failure is mirrored into an explicit logfile argument"
+  ok "no-binary failure is mirrored into an explicit logfile argument"
 else
-  no "no-worker failure is mirrored into an explicit logfile argument" "$log"
+  no "no-binary failure is mirrored into an explicit logfile argument" "$log"
 fi
 
 # An unwritable log must still reach stderr and must not wedge.
@@ -334,17 +331,6 @@ if contains "would run Go collector ($TMP/My Checkout/collector)" "$out"; then
   ok "finds a binary one level up under a path with spaces"
 else
   no "finds a binary one level up under a path with spaces" "$out"
-fi
-
-d="$TMP/Python Home"
-mkdir -p "$d/python"
-cp "$TARGET" "$d/run-forever.sh"
-: > "$d/python/collector.py"
-out="$( (cd "$TMP" && "$SH" "$d/run-forever.sh" --check) 2>&1 )"
-if contains "would run Python worker" "$out"; then
-  ok "finds the Python twin under a path with spaces"
-else
-  no "finds the Python twin under a path with spaces" "$out"
 fi
 
 d="$TMP/Working Dir"

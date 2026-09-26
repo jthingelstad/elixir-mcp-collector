@@ -15,6 +15,6 @@ Submenu → Button) age well; screenshots do not.>
 
 <The two or three things you had to look up.>
 
-End by running `collector doctor` (or `python3 collector.py --check`)
-and pasting its output with the secrets it already redacts. Then open a
-pull request adding this file and a row in `README.md`'s table.
+End by running `collector doctor` and pasting its output with the
+secrets it already redacts. Then open a pull request adding this file
+and a row in `README.md`'s table.

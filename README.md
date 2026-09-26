@@ -29,18 +29,13 @@ Running a collector earns its operator a higher daily tool-call quota
 on Elixir MCP, a Clash Royale card as its public identity, and a spot
 on the collector ladder.
 
-Two interchangeable implementations live here — a **Go** binary and a
-**Python** script — deliberately, so a bad release of one can never
-silence a whole fleet. Pick whichever your machine prefers.
-
 ## You need
 
 - A machine that stays on, with a **static public IP** (this is the
   real requirement — Clash Royale keys are IP-allowlisted).
 - A **Clash Royale API key** from <https://developer.clashroyale.com>,
   created with that IP allowlisted.
-- Either nothing else (the Go binary is self-contained) or **Python
-  3.8+** (standard library only — no `pip install`).
+- Nothing else: the collector is a single self-contained binary.
 
 ## 1. Raise your hand
 
@@ -67,11 +62,10 @@ That is the entire configuration. Everything else — how fast to fetch,
 what to fetch, when to back off — the server hands the collector at
 startup.
 
-**Where `.env` goes:** each worker reads it from **its own directory**,
-not from wherever you happen to be standing. The Go binary looks beside
-the binary; `python/collector.py` looks beside `collector.py`, so the
-Python twin wants `python/.env`. Set `ELIXIR_MCP_ENV_FILE` to an
-absolute path if you would rather keep config somewhere else.
+**Where `.env` goes:** the collector reads it from **its own
+directory** — beside the binary — not from wherever you happen to be
+standing. Set `ELIXIR_MCP_ENV_FILE` to an absolute path if you would
+rather keep config somewhere else.
 
 ## 3. Run it
 
@@ -185,54 +179,28 @@ check still leaves you something to read. The log rotates at 10 MB,
 keeping one previous generation as `collector.log.1`; set
 `MAX_LOG_BYTES` to change the threshold, or to `0` to turn rotation off.
 
-### Prefer Python, or an unlisted platform?
+### An unlisted platform?
 
-The `collector.py` twin runs anywhere with **Python 3.8+** (standard
-library only — no `pip install`), identical behavior to the Go binary.
-It ships as a release asset with its own SHA-256, so pin and verify it
-the same way you would the binary rather than curling whatever `main`
-happens to be:
+Build the binary yourself: `go build -o collector ./cmd/collector` works
+for any target Go supports. A self-built binary reports its version as
+`dev` and never self-updates, so update it yourself when asked.
 
-```sh
-mkdir -p ~/elixir-collector && cd ~/elixir-collector
-TAG=$(curl -fsSL https://api.github.com/repos/jthingelstad/elixir-mcp-collector/releases/latest | sed -n 's/.*"tag_name": "\([^"]*\)".*/\1/p')
-base=https://github.com/jthingelstad/elixir-mcp-collector/releases/download/$TAG
-curl -fsSL -o collector.py "$base/collector.py"
-curl -fsSL "$base/SHA256SUMS" | grep ' collector.py$' | shasum -a 256 -c -
-```
-
-Then put your `.env` **beside `collector.py`** (that is where it looks,
-not the directory you run from) and start it:
-
-```sh
-chmod 600 .env
-python3 collector.py
-```
-
-Supervise it with your platform's service manager (launchd, Scheduled
-Task, systemd, or `run-forever.sh` — with no binary present the loop
-runs the Python twin instead).
-
-The Python twin **never self-updates**; that is the point of it. It
-exists so a bad Go release cannot silence a whole fleet, so re-run the
-download above when a new release lands. A copy running straight out of
-a git checkout reports its version as `py-dev`, and a released copy
-reports `py-<tag>`, so you can always tell which one a machine is
-running. Building the Go binary yourself is
-`go build -o collector ./cmd/collector` for any target Go supports.
+**Ran the Python collector?** It was retired on 2026-09-26. Stop it and
+whatever supervises it, then run your platform's installer command
+above (`install.sh`, or `install.ps1` on Windows) from the directory
+holding its `.env` to put the Go binary on the same token.
 
 ## 4. Confirm it's working
 
-**Ask the doctor first.** Both implementations carry a read-only
-preflight that runs five checks and prints one summary — your runtime,
+**Ask the doctor first.** The collector carries a read-only preflight
+that runs five checks and prints one summary — your runtime,
 the `.env` and the shape of both secrets (never their values), what
 Elixir MCP thinks this collector is (identity, lifecycle state, channel,
 clock skew), the public IP your box reaches out from, and one cheap
 Clash Royale read from that IP with your key:
 
 ```sh
-./collector doctor            # Go binary
-python3 collector.py --check  # Python twin
+./collector doctor
 ```
 
 The two things that fail most, in words rather than status codes:
@@ -280,9 +248,9 @@ to tear down.
 
 ## Staying current
 
-Released Go binaries self-update, always and automatically. The Python
-script and locally-built binaries cannot, so their operators are
-expected to update them when asked.
+Released binaries self-update, always and automatically. Locally-built
+binaries cannot, so their operators are expected to update them when
+asked.
 
 **Which release is live.** Every green build publishes a release, so a
 release existing does not mean anyone runs it. Candidates are marked as
@@ -347,10 +315,9 @@ contract, so a collector running last month's code is a liability to
 everyone else, not a private choice. If you cannot accept automatic
 updates, running a collector is not for you.
 
-The Python twin is not a way around this. It exists so that a bad Go
-release cannot silence the whole fleet, and operators who run it are
-expected to update it when asked. Self-built binaries are for
-developing on this repo, not for freezing a production collector.
+A self-built binary is not a way around this. It is for developing on
+this repo and for platforms with no prebuilt binary, and its operator
+is expected to update it when asked.
 
 ## What a collector can and cannot do
 
@@ -385,7 +352,7 @@ The queue-message and API contracts are canonical in the main repo
 `packages/contracts`) and enforced server-side; this repo's tests pin
 the shapes it produces so drift fails here first. `AGENTS.md` is the
 working guide; `docs/GO-PORT.md` is the design history. `main` must stay
-releasable — CI (`go test` + Python `unittest`) gates it.
+releasable — CI (`go test` and the shell tests) gates it.
 
 ## License
 

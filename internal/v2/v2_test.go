@@ -308,11 +308,10 @@ func TestV2RawCeilingIsDistinct(t *testing.T) {
 	}
 }
 
-// The server owns the breaker (AGENTS.md rule 2). The Go client used to
+// The server owns the breaker (AGENTS.md rule 2). The client used to
 // decode threshold_403 and cooldown_s and then ignore both, opening at
 // a hard-coded five and staying shut for a hard-coded fifteen minutes,
-// while the Python twin honoured them - two runtimes, two behaviours,
-// from one config. Collector issue #2.
+// whatever the config said. Collector issue #2.
 func TestV2BreakerHonoursServerConfig(t *testing.T) {
 	var fetches int
 	door := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

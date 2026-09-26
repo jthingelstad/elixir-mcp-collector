@@ -11,14 +11,21 @@ guide and must stay accurate; this file is the working guide for agents.
 A collector is a pure API client of Elixir MCP: it leases fetch jobs
 over three HTTPS endpoints (`/api/collector/config|lease|submit`),
 calls the Clash Royale API with the operator's IP-bound key, and posts
-gzipped results back. No AWS, no database, no cloud access. Two
-interchangeable implementations — Go (`cmd/collector`, `internal/`) and
-Python (`python/collector.py`) — kept deliberately diverse so a bad
-release of one cannot silence a fleet. The old Node worker and the SQS
-transport were retired 2026-09-06 (zero-trust door + Postgres job
-ledger) and their code was DELETED the same day; do not resurrect them.
-The Go module now has no third-party dependencies at all, which is what
-makes "no AWS access" a property of the build rather than a promise.
+gzipped results back. No AWS, no database, no cloud access. One
+implementation, in Go (`cmd/collector`, `internal/`). The old Node
+worker and the SQS transport were retired 2026-09-06 (zero-trust door +
+Postgres job ledger) and their code was DELETED the same day; do not
+resurrect them. The Go module now has no third-party dependencies at
+all, which is what makes "no AWS access" a property of the build rather
+than a promise.
+
+**Go only since 2026-09-26 (Jamie's decision).** A stdlib Python twin
+used to ship beside the binary as insurance against a bad Go release.
+It was deleted because it doubled every change and, never
+self-updating, forced the hub to keep retired contract fields alive for
+it (the `poll` block, issue #7). Do not bring it back or add a second
+implementation: release insurance moves into the Go updater, and
+candidates soak as a dev build (rule 8).
 
 ## Rules
 
@@ -29,7 +36,7 @@ makes "no AWS access" a property of the build rather than a promise.
    `.env.v2-go` once slipped past a too-narrow ignore and leaked to the
    public remote — `.gitignore` now ignores all `.env.*` except
    `.env.example`. Rotate on any exposure.)
-2. **The server owns the contract AND the behavior.** The clients speak
+2. **The server owns the contract AND the behavior.** The client speaks
    config/lease/submit; the server computes each CR path, says when to
    check in again (`next_check_in_s` on every lease answer; since
    2026-09-11 a collector never asks the door to wait, and every
@@ -50,14 +57,13 @@ makes "no AWS access" a property of the build rather than a promise.
    and hourly after, so naming a version reaches the fleet within the
    hour. There is NO pin and no opt-out, deliberately: the fleet shares
    one rate budget and one contract, so a stale client is everyone's
-   problem. Do not add a pin flag, and do not present the Python twin as
-   a way to freeze a version - it is release insurance. Dev builds and
-   the Python client cannot self-update; their operators update when
-   asked. `min_client_version` is parsed from `/config` and NOT enforced
-   by either client, which is the obvious lever if a stale client ever
-   needs refusing. (The `collector_release` rows the config endpoint
-   serves are populated server-side; until they are, released binaries
-   simply don't auto-update - that's safe.) Cross-platform: release.yml
+   problem. Do not add a pin flag. Dev builds cannot self-update; their
+   operators update when asked. `min_client_version` is parsed from
+   `/config` and NOT enforced by the client, which is the obvious lever
+   if a stale client ever needs refusing. (The `collector_release` rows
+   the config endpoint serves are populated server-side; until they are,
+   released binaries simply don't auto-update - that's safe.)
+   Cross-platform: release.yml
    builds macOS (arm64/amd64), Windows (amd64/arm64), and Linux
    (amd64/arm64/armv7). Windows self-update renames the running .exe
    aside (can't overwrite a locked binary) and cleans the `.old` at next
@@ -67,14 +73,13 @@ makes "no AWS access" a property of the build rather than a promise.
    never work (a missing token): `run-forever.sh` stops, systemd has
    `RestartPreventExitStatus=2`, and no supervisor should spin on it.
    Anything else is restartable - crash, watchdog, or self-update.
-   Both clients exit 2 for the same reason; keep them in step.
-6. **Durability: exit rather than wedge.** Both clients run a progress
+6. **Durability: exit rather than wedge.** The client runs a progress
    watchdog — 5 minutes with no successful server round-trip and the
    process exits(1) so the supervisor restarts it clean. Any door
    response (even an error) counts as progress. This exists because a
    door redeploy once wedged the dev collectors (alive but not
    progressing); launchd KeepAlive only restarts a process that EXITS.
-7. **Observability: the log shows work.** Both clients emit a JSON
+7. **Observability: the log shows work.** The client emits a JSON
    activity summary every 5 minutes (jobs done, fetch errors, channel).
    Don't log per-fetch (too noisy at ~40/min).
 8. **A published release is a CANDIDATE, not a shipment.** Every green
@@ -82,18 +87,26 @@ makes "no AWS access" a property of the build rather than a promise.
    Elixir MCP names it — naming also promotes that release to Latest.
    `releases/latest` is what `install.sh`, `install.ps1` and the README
    hand a new operator, so promotion-on-naming keeps a fresh install
-   matched to what the fleet actually runs. Soak a candidate on one
-   machine before naming it, and never flip the prerelease flag by hand
-   or the release page starts lying about what is live. Procedure,
-   including rollback and the platform-key trap that fails silently:
-   `docs/RELEASING-COLLECTOR.md` in the elixir-mcp repo.
+   matched to what the fleet actually runs. Soak a candidate before
+   naming it by running a dev build of its commit
+   (`go build -o collector ./cmd/collector`) on one machine: a released
+   binary cannot soak, because it downgrades itself to the named version
+   within seconds, while a dev build never self-updates. A dev build
+   does not exercise the update path, so until the Go updater carries
+   the insurance the twin used to, review changes to startup and
+   self-update with the fleet in mind: a release that breaks either
+   cannot be undone by naming its predecessor. Never flip the
+   prerelease flag by hand or the release page starts lying about what
+   is live. Procedure, including rollback and the platform-key trap
+   that fails silently: `docs/RELEASING-COLLECTOR.md` in the elixir-mcp
+   repo.
 
-9. Work lands on `main`; CI (`go test`, Python `unittest`, and the
-   `run-forever.sh` shell tests, all in
-   `.github/workflows/validate.yml`) is the pre-push gate. `main` must
-   stay releasable — `release.yml` builds the seven platform artifacts
-   plus the Python twin from green main. Operator-facing behavior
-   changes update `README.md` in the same commit.
+9. Work lands on `main`; CI (`gofmt`, `go vet`, `go test`, and the
+   `run-forever.sh` and `install.sh` shell tests under `sh` and `dash`,
+   all in `.github/workflows/validate.yml`) is the pre-push gate. `main`
+   must stay releasable — `release.yml` builds the seven platform
+   artifacts from green main. Operator-facing behavior changes update
+   `README.md` in the same commit.
 
 ## Layout
 
@@ -103,14 +116,14 @@ makes "no AWS access" a property of the build rather than a promise.
 - `internal/v2/` — the zero-trust client (config/lease/submit, watchdog,
   activity log, update authority).
 - `internal/doctor/` — the operator preflight (`collector doctor
-  [--json]`; Python: `collector.py --check [--json]`). Five read-only
-  checks, all of which run; exit 0 healthy / 1 broken / 2 valid-but-not-
-  yet-active; secrets shown as their last four characters in every mode.
+  [--json]`). Five read-only checks, all of which run; exit 0 healthy /
+  1 broken / 2 valid-but-not-yet-active; secrets shown as their last
+  four characters in every mode.
   It NEVER leases (a diagnostic lease would orphan a real job for its
   TTL) - it reads `/config`, which since 2026-09-11 answers `pending`
   tokens, returns 403 `revoked`, echoes `observed_ip`, and names the one
-  CR path (`doctor.cr_path`) doctor may read. Both twins print the same
-  report; `doctor_test.go` and `DoctorTests` pin the same wording.
+  CR path (`doctor.cr_path`) doctor may read. `doctor_test.go` pins the
+  report's wording.
 - `internal/filter/` — what a lease asks the collector to drop before
   submitting (2026-09-11): `filter.battles_after` on a battlelog lease
   is the newest battleTime the hub holds, in the API's own spelling;
@@ -118,33 +131,24 @@ makes "no AWS access" a property of the build rather than a promise.
   date parse), returns observed/filtered counts, and leaves a non-array
   body untouched so the hub still sees what the API said. The submit
   carries `observed` and `filtered` beside `fetched_at`; the body stays
-  the API's array. Python: `filter_battlelog()`, same semantics, pinned
-  by `FilterTests`. The hub filters under its own mark regardless, so a
+  the API's array. The hub filters under its own mark regardless, so a
   collector that ignores the filter is correct, only wasteful - which is
   why the field is optional on both sides.
 - `internal/crapi`, `internal/breaker` — CR API paths + the 403 breaker
   (shared helpers). `internal/worker` (SQS envelopes) and
   `internal/update` (GitHub-polling updater) were DELETED 2026-09-06
   with the transport they served; do not reintroduce either.
-- `python/collector.py` — the stdlib-only twin; `python/test_collector.py`
-  its tests. It ships as a release asset (`collector.py`) with its own
-  SHA-256 line in SHA256SUMS, so operators pin and verify it like the
-  binary. `release.yml` stamps the tag into `VERSION`; the checked-in
-  value stays `py-dev` so a working-tree run is visibly a dev build in
-  the admin version column. It never self-updates - that is the point
-  of the twin, not a gap to close.
 - `scripts/install.sh` — one-command install for macOS/Linux (download
   binary + supervise via launchd/systemd). `scripts/install.ps1` — the
   Windows equivalent (download .exe + register a Scheduled Task).
   `scripts/elixir-collector.service` (systemd unit),
   `scripts/run-forever.sh` (generic POSIX KeepAlive loop for DSM and
   other hosts without a supervisor; finds the binary in its own dir,
-  its parent, or `$PWD`, falls back to the Python twin, and exits with
-  a message rather than restart-looping when it finds neither).
-  Start-up failures go to stderr AND are mirrored into the log, because
-  DSM Task Scheduler discards stderr; the log rotates at `MAX_LOG_BYTES`
-  (10 MB default, one generation) since volunteer hardware runs this for
-  years. `scripts/test-run-forever.sh` (its tests; CI runs them under
+  its parent, or `$PWD`, and exits with a message rather than
+  restart-looping when it finds none). Start-up failures go to stderr
+  AND are mirrored into the log, because DSM Task Scheduler discards
+  stderr; the log rotates at `MAX_LOG_BYTES` (10 MB default, one
+  generation) since volunteer hardware runs this for years. `scripts/test-run-forever.sh` (its tests; CI runs them under
   both `sh` and `dash`, dash standing in for BusyBox ash).
 - `docs/recipes/` — where to run one. `cloud-init.yaml` is the single
   cloud recipe (any Linux VM with cloud-init: unprivileged user, .env
@@ -162,24 +166,18 @@ makes "no AWS access" a property of the build rather than a promise.
 
 ## Local services on this host
 
-Jamie's machine runs the v2 pair, card identities Ram Rider (Go) and
-Tesla (Python). **Neither runs out of this
-checkout any more** (2026-09-06): both were moved to released artifacts
-under `~/elixir-collectors/<name>/`, each with its own `.env` beside it,
-so editing this repo cannot reach a live collector.
+Jamie's machine runs one collector, card identity Ram Rider. **It does
+not run out of this checkout** (2026-09-06): it is a released artifact
+under `~/elixir-collectors/ram-rider/` with its own `.env` beside it, so
+editing this repo cannot reach a live collector.
 
 - `com.poapkings.elixir-mcp-gw-go` -> `~/elixir-collectors/ram-rider/collector`,
   a released Go binary. It SELF-UPDATES, so a door change no longer needs
   a hand bounce here.
-- `com.poapkings.elixir-mcp-gw2-py` -> `~/elixir-collectors/tesla/collector.py`,
-  the released Python twin (`py-<tag>`). It never self-updates by design;
-  re-download it from a release when you want it current. Keep this one
-  Python — one Go plus one Python is the whole point of the twin, and
-  Jamie has said so explicitly.
 
-Reload either with `launchctl unload/load` (a plist path or env change
-needs a full reload, not `kickstart`). Logs:
-`~/Library/Logs/elixir-mcp-gw-go.log` and `…-gw2-py.log`.
+Reload it with `launchctl unload/load` (a plist path or env change
+needs a full reload, not `kickstart`). Log:
+`~/Library/Logs/elixir-mcp-gw-go.log`.
 
 Do NOT run a staged collector by hand to check its version: if a `.env`
 is already beside it you have just started a second live collector on
