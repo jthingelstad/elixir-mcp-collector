@@ -180,18 +180,23 @@ candidates soak as a dev build (rule 8).
 
 ## Local services on this host
 
-Jamie's machine runs one collector, card identity Ram Rider. **It does
-not run out of this checkout** (2026-09-06): it is a released artifact
-under `~/elixir-collectors/ram-rider/` with its own `.env` beside it, so
-editing this repo cannot reach a live collector.
+Jamie's machine runs two collectors, card identities Ram Rider and
+Tesla, both released Go binaries. **Neither runs out of this checkout**
+(2026-09-06): each is a released artifact under
+`~/elixir-collectors/<name>/` with its own `.env` beside it, so editing
+this repo cannot reach a live collector. Both SELF-UPDATE, so a door
+change no longer needs a hand bounce here.
 
-- `com.poapkings.elixir-mcp-gw-go` -> `~/elixir-collectors/ram-rider/collector`,
-  a released Go binary. It SELF-UPDATES, so a door change no longer needs
-  a hand bounce here.
+- `com.poapkings.elixir-mcp-gw-go` -> `~/elixir-collectors/ram-rider/collector`.
+  Log: `~/Library/Logs/elixir-mcp-gw-go.log`.
+- `com.poapkings.elixir-mcp-gw2-py` -> `~/elixir-collectors/tesla/collector`.
+  Tesla ran the Python twin until 2026-09-26 and was converted to Go in
+  place; the launchd label and log path
+  (`~/Library/Logs/elixir-mcp-gw2-py.log`) kept their old names because
+  other host tooling references them. Don't rename them as tidying.
 
-Reload it with `launchctl unload/load` (a plist path or env change
-needs a full reload, not `kickstart`). Log:
-`~/Library/Logs/elixir-mcp-gw-go.log`.
+Reload either with `launchctl unload/load` (a plist path or env change
+needs a full reload, not `kickstart`).
 
 Do NOT run a staged collector by hand to check its version: if a `.env`
 is already beside it you have just started a second live collector on
