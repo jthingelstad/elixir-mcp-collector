@@ -13,12 +13,17 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jthingelstad/elixir-mcp-collector/internal/breaker"
@@ -103,6 +108,48 @@ const (
 // recovered the 2026-09-06 phase-1-redeploy wedge.
 const WatchdogTimeout = 5 * time.Minute
 
+// Response bounds (issue #6): every read stops at max+1, so an answer
+// over the bound is known to be too large without ever holding more.
+const (
+	maxDoorBytes   = 1 << 20   // config, lease and submit answers are a few KB
+	maxUpdateBytes = 200 << 20 // a collector binary is ~10 MB
+)
+
+// SecureBase decides what ELIXIR_API_BASE the collector will talk to.
+// The bearer rides every call, so plain http:// would put it on the wire
+// in the clear (issue #6). It repairs rather than refuses, because a
+// refusal would stop a collector that ran fine before an automatic
+// update: https passes; http to a loopback address (local development,
+// where the token never leaves the machine) passes with a note; http to
+// anything else is upgraded to https with a note. The note is for the
+// startup log and doctor, and is "" when there is nothing to say.
+func SecureBase(raw string) (base, note string) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw, "ELIXIR_API_BASE is not an absolute URL; no call to it can succeed"
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return raw, ""
+	case "http":
+		if isLoopback(u.Hostname()) {
+			return raw, "ELIXIR_API_BASE is plain http to a loopback address - development only"
+		}
+		u.Scheme = "https"
+		return u.String(), "ELIXIR_API_BASE is plain http, which would send the collector token in the clear; using " +
+			u.String() + " instead - change it in .env"
+	}
+	return raw, "ELIXIR_API_BASE scheme " + u.Scheme + " is not https; no call to it can succeed"
+}
+
+func isLoopback(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func (c *Client) call(method, route string, body any, out any) (int, error) {
 	return c.callWithHTTP(c.HTTP, method, route, body, out)
 }
@@ -128,18 +175,22 @@ func (c *Client) callWithHTTP(client *http.Client, method, route string, body an
 		return 0, err
 	}
 	defer res.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	data, err := io.ReadAll(io.LimitReader(res.Body, maxDoorBytes+1))
 	if err != nil {
 		return res.StatusCode, err
+	}
+	// A response from the door - any status, any body, even one too
+	// large or malformed to use - is progress: the process is not
+	// wedged, so the watchdog must not restart it (AGENTS.md rule 6).
+	c.lastProgress = c.Now()
+	if len(data) > maxDoorBytes && out != nil {
+		return res.StatusCode, fmt.Errorf("%s %s: response over %d bytes", method, route, maxDoorBytes)
 	}
 	if out != nil && len(data) > 0 {
 		if err := json.Unmarshal(data, out); err != nil {
 			return res.StatusCode, err
 		}
 	}
-	// A response from the door - any status - is progress: the process
-	// is not wedged.
-	c.lastProgress = c.Now()
 	return res.StatusCode, nil
 }
 
@@ -233,9 +284,15 @@ func (c *Client) applyUpdate(url, wantSha string) error {
 	if res.StatusCode != 200 {
 		return fmt.Errorf("download HTTP %d", res.StatusCode)
 	}
-	data, err := io.ReadAll(io.LimitReader(res.Body, 200<<20))
+	if res.ContentLength > maxUpdateBytes {
+		return fmt.Errorf("download over %d bytes", maxUpdateBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(res.Body, maxUpdateBytes+1))
 	if err != nil {
 		return err
+	}
+	if len(data) > maxUpdateBytes {
+		return fmt.Errorf("download over %d bytes", maxUpdateBytes)
 	}
 	sum := sha256.Sum256(data)
 	if hex.EncodeToString(sum[:]) != wantSha {
@@ -245,27 +302,104 @@ func (c *Client) applyUpdate(url, wantSha string) error {
 	if err != nil {
 		return err
 	}
+	return installBinary(self, data)
+}
+
+// renameFile is os.Rename; tests swap it to interrupt an install.
+var renameFile = os.Rename
+
+// installBinary puts data in place of the binary at self (issue #6).
+// The new file is created exclusively under a random name in the target
+// directory (never a predictable path a symlink could be planted on),
+// written, fsynced and checked, then renamed over the target in one
+// step; the directory is fsynced so the rename survives a power cut. On
+// any failure the temp file is removed and the running binary is
+// untouched.
+func installBinary(self string, data []byte) (err error) {
+	// Update the file itself, not a symlink to it: on macOS
+	// os.Executable can return the link the binary was started through.
+	if real, err := filepath.EvalSymlinks(self); err == nil {
+		self = real
+	}
+	st, err := os.Lstat(self)
+	if err != nil {
+		return err
+	}
+	if !st.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", self)
+	}
+	dir := filepath.Dir(self)
+	f, err := os.CreateTemp(dir, ".collector-update-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer func() {
+		if err != nil {
+			_ = f.Close()
+			_ = os.Remove(tmp)
+		}
+	}()
+	if _, err = f.Write(data); err != nil {
+		return err
+	}
+	if err = f.Chmod(0o755); err != nil {
+		return err
+	}
+	// A filesystem that cannot fsync (some FUSE and SMB mounts on NAS
+	// boxes) must not strand this collector on an old version forever:
+	// durability is lost there, the update is not.
+	if err = f.Sync(); err != nil && !errors.Is(err, errors.ErrUnsupported) && !errors.Is(err, syscall.EINVAL) {
+		return err
+	}
+	err = nil
+	// The path must still name the file we wrote: if something replaced
+	// it since CreateTemp, renaming it into place would install that.
+	written, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	now, err := os.Lstat(tmp)
+	if err != nil {
+		return err
+	}
+	if !now.Mode().IsRegular() || !os.SameFile(written, now) {
+		return fmt.Errorf("%s changed while the update was written", tmp)
+	}
+
 	if runtime.GOOS == "windows" {
-		// Windows locks a running .exe: you cannot overwrite it, but you
-		// CAN rename it aside. Move self out of the way, then write the
-		// new binary to the original path; the supervisor restarts into
-		// it. A prior ".old" is cleaned at startup.
+		// Windows locks a running .exe: it cannot be overwritten, but it
+		// CAN be renamed aside. Move self out of the way, then rename the
+		// verified file into its place; the supervisor restarts into it.
+		// A prior ".old" is cleaned at startup.
 		backup := self + ".old"
 		_ = os.Remove(backup)
-		if err := os.Rename(self, backup); err != nil {
+		if err = renameFile(self, backup); err != nil {
 			return err
 		}
-		if err := os.WriteFile(self, data, 0o755); err != nil {
-			_ = os.Rename(backup, self) // roll back
+		if err = renameFile(tmp, self); err != nil {
+			_ = renameFile(backup, self) // roll back
 			return err
 		}
 		return nil
 	}
-	tmp := filepath.Join(filepath.Dir(self), ".collector-update")
-	if err := os.WriteFile(tmp, data, 0o755); err != nil {
+	if err = renameFile(tmp, self); err != nil {
 		return err
 	}
-	return os.Rename(tmp, self)
+	syncDir(dir)
+	return nil
+}
+
+// syncDir makes a rename in dir durable. Best effort: the rename has
+// already happened, and some filesystems refuse fsync on a directory.
+func syncDir(dir string) {
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
 }
 
 func (c *Client) pace() {
@@ -352,7 +486,13 @@ func (c *Client) PollOnce(ctx context.Context) (Outcome, error) {
 
 	submit := map[string]any{"lease": l.Lease, "fetched_at": fetchedAt}
 	overflow := false
-	if fetched.Kind == "http" && fetched.Status == 200 {
+	if fetched.Kind == "http" && fetched.Status == 200 && fetched.TooLarge {
+		// Over the bound on the way in (crapi.MaxBodyBytes): the body
+		// was never kept, so it is an overflow like any other.
+		overflow = true
+		submit["status"] = "error"
+		submit["error"] = map[string]string{"kind": "overflow"}
+	} else if fetched.Kind == "http" && fetched.Status == 200 {
 		// What the API handed us before any filter, so the hub can say
 		// what the edge saved (2026-09-11).
 		submit["api_bytes"] = len(fetched.BodyText)
@@ -421,8 +561,9 @@ func (c *Client) PollOnce(ctx context.Context) (Outcome, error) {
 // maxRawBytes is the raw-response safety ceiling, distinct from the
 // server-configured transport overflow (judged on the gzip+base64 ENCODED
 // size). No legitimate CR response is anywhere near this; it only bounds
-// what we are willing to gzip.
-const maxRawBytes = 8 << 20
+// what we are willing to gzip. crapi stops reading there, so a real
+// fetch over it arrives as TooLarge; this check covers any other Fetch.
+const maxRawBytes = crapi.MaxBodyBytes
 
 // Run is the forever loop: config, then check in / fetch / submit, and
 // sleep exactly as long as the door said before checking in again. No

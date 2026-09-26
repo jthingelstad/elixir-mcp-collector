@@ -152,6 +152,31 @@ else
   no "an existing collector survives a failed install"
 fi
 
+# --- 8. a group/world-readable .env is tightened, not refused (issue #6) ---
+env_mode() { ls -ln "$1" | cut -c1-10; }
+setup loose "$GOOD_SHA  collector_linux_amd64"
+chmod 644 "$TMP/loose/run/.env"
+out="$(run loose)"; code=$?
+if [ "$code" -eq 0 ] && contains "Tightened .env to owner-only" "$out"; then
+  ok "a loose .env is tightened and the install goes on"
+else
+  no "a loose .env is tightened and the install goes on" "exit $code: $out"
+fi
+if [ "$(env_mode "$TMP/loose/run/.env")" = "-rw-------" ]; then
+  ok "the loose .env ends owner-only"
+else
+  no "the loose .env ends owner-only" "$(env_mode "$TMP/loose/run/.env")"
+fi
+
+setup tight "$GOOD_SHA  collector_linux_amd64"
+chmod 600 "$TMP/tight/run/.env"
+out="$(run tight)"
+if contains "Tightened" "$out"; then
+  no "a private .env is left alone" "$out"
+else
+  ok "a private .env is left alone"
+fi
+
 echo
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -56,6 +56,7 @@ type Options struct {
 	CRToken  string
 	APIToken string
 	Base     string
+	BaseNote string // what v2.SecureBase said about ELIXIR_API_BASE
 	HTTP     *http.Client
 	Fetch    func(ctx context.Context, path string) crapi.Result
 	Now      func() time.Time
@@ -145,6 +146,7 @@ func checkEnv(o Options) Check {
 				c.Detail += fmt.Sprintf(" (mode %o)", mode)
 				if mode&0o077 != 0 {
 					c.Warn = true
+					c.Lines = append(c.Lines, "readable by other accounts on this box - the running collector tightens it to owner-only at startup and logs that it did, or why it could not")
 					c.Fix = "chmod 600 " + o.EnvPath + " - it holds two secrets"
 				}
 			}
@@ -205,6 +207,10 @@ var stateText = map[string]string{
 
 func checkElixir(ctx context.Context, o Options) (Check, *config) {
 	c := Check{Name: "elixir", Detail: o.Base, Fields: map[string]string{}}
+	if o.BaseNote != "" {
+		c.Warn = true
+		c.Lines = append(c.Lines, o.BaseNote)
+	}
 	if o.APIToken == "" {
 		c.Detail += " - skipped, no ELIXIR_API_TOKEN"
 		return c, nil

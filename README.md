@@ -67,6 +67,22 @@ directory** — beside the binary — not from wherever you happen to be
 standing. Set `ELIXIR_MCP_ENV_FILE` to an absolute path if you would
 rather keep config somewhere else.
 
+**Keep it private.** `.env` holds both secrets, so it should be readable
+by its owner only. If it is readable by group or other accounts, the
+collector tightens it to owner-only at startup and logs a warning; when
+it cannot (the file belongs to another account, or sits on a read-only
+filesystem) it logs that, keeps running, and `collector doctor` shows
+the finding. `install.sh` does the same repair, and `install.ps1` sets
+a Windows ACL that lets only your account (and SYSTEM) read the file.
+
+**Only over HTTPS.** Your collector token goes with every call, so the
+collector talks to Elixir MCP over HTTPS only. Nobody normally sets
+`ELIXIR_API_BASE`. If it is set to a plain `http://` address, the
+collector switches it to `https://` and logs a warning. The one
+exception is a loopback address (`localhost`, `127.0.0.1`, `::1`) for
+local development, which stays on plain HTTP with a note. The collector
+also refuses to follow a redirect from HTTPS down to HTTP.
+
 ## 3. Run it
 
 **Nowhere to run it yet?** [`docs/recipes/`](docs/recipes/README.md)
@@ -107,10 +123,20 @@ install) that starts at logon and restarts on failure.
 curl -fsSL https://raw.githubusercontent.com/jthingelstad/elixir-mcp-collector/main/scripts/install.sh | sh
 ```
 
-Downloads the binary; then supervise it with systemd — edit
-`User=`/`WorkingDirectory=` in `scripts/elixir-collector.service`, copy
-it to `/etc/systemd/system/`, and `sudo systemctl enable --now
-elixir-collector`.
+Downloads the binary; then supervise it with systemd — edit `User=`
+and the three `/CHANGE_ME` paths (`WorkingDirectory=`, `ExecStart=`,
+`ReadWritePaths=`) in `scripts/elixir-collector.service`, copy it to
+`/etc/systemd/system/`, and `sudo systemctl enable --now
+elixir-collector`. Running several collectors, one directory each? The
+unit's header shows the `elixir-collector@.service` form with `%i`.
+
+The unit is sandboxed: no capabilities, no privilege escalation, a
+private `/tmp`, the kernel and devices hidden, and the whole filesystem
+read-only except the collector's own directory. That directory has to be
+in `ReadWritePaths=`, because self-update writes the new binary there. A
+unit you installed before this was added keeps working as it is; copy
+the new one over it (keeping your paths) and `sudo systemctl
+daemon-reload` to pick up the sandbox.
 
 ### NAS and anything without systemd (Synology DSM, BSD, OpenWrt)
 
@@ -304,6 +330,13 @@ line in your log is the answer:
 The collector also sends that version to the server on every call, so
 the maintainer can see your version even when you cannot.
 
+**How it writes the new binary.** The download is checked against the
+SHA-256 first. It is then written to a new file with a random name in
+the collector's own directory, created fresh so it can never follow a
+link someone left there, flushed to disk, and renamed over the old
+binary in one step. If anything fails along the way, the temporary file
+is removed and the old binary keeps running.
+
 **On Windows**, a running `.exe` cannot be overwritten, so the update
 renames the old binary to `collector.exe.old` beside itself and writes
 the new one in its place. That file is deleted at the next startup.
@@ -347,6 +380,16 @@ is expected to update it when asked.
 - It holds no AWS credentials and can reach nothing in the Elixir MCP
   cloud beyond three HTTPS endpoints. It never sees accounts, emails,
   or sessions — only public Clash Royale data.
+- It caps how much of any response it will read: 8 MB from the Clash
+  Royale API (a larger body is reported to Elixir MCP as an overflow),
+  1 MB from Elixir MCP, 200 MB for an update. The limit applies while
+  reading and after decompression, so an oversized answer cannot
+  exhaust memory.
+- Its log never carries either secret or a response body.
+
+What the collector protects on your machine, and what it leaves to your
+operating system on each platform, is in
+[`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
 
 ## Contributing / architecture
 

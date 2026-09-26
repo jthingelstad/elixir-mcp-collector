@@ -24,5 +24,8 @@ Notes:
   and set it to run whether the user is logged on or not.
 - Self-update renames the running `.exe` aside and cleans it up at the
   next start; the `collector.exe.old` you may see is expected.
-- Doctor skips the file-mode check on Windows (no POSIX modes); keep the
-  folder to yourself with normal NTFS permissions.
+- The installer restricts `.env` to your account and SYSTEM (inheritance
+  off), and checks the result. If you change the task to run as a
+  different account, give that account read access to `.env` too, or
+  the collector will not find its tokens. Doctor does not check Windows
+  ACLs; `icacls .env` shows what is set.

@@ -14,6 +14,37 @@ if (-not (Test-Path "$dir\.env")) {
   Write-Error "No .env here. Copy .env.example to .env and fill in CR_API_TOKEN + ELIXIR_API_TOKEN first."
 }
 
+# .env holds two secrets: give it a user-only ACL (issue #6) - inheritance
+# off, and exactly two entries, you (the account the Scheduled Task runs
+# as) and SYSTEM (the OS itself). Then read it back and check. A failure
+# here warns rather than stops the install; `collector doctor` does not
+# inspect Windows ACLs, so this is the place it is set.
+# (scripts/test-install-acl.ps1 runs the block between the markers.)
+# BEGIN env-acl
+$envPath = "$dir\.env"
+$me      = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$system  = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-18")
+try {
+  $acl = New-Object System.Security.AccessControl.FileSecurity
+  $acl.SetAccessRuleProtection($true, $false)
+  foreach ($sid in @($me, $system)) {
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, "FullControl", "Allow")))
+  }
+  Set-Acl -LiteralPath $envPath -AclObject $acl
+
+  $check  = Get-Acl -LiteralPath $envPath
+  $others = @($check.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) |
+    Where-Object { $_.IdentityReference -ne $me -and $_.IdentityReference -ne $system })
+  if (-not $check.AreAccessRulesProtected -or $others.Count -ne 0) {
+    throw "the ACL read back still grants $($others.Count) other account(s)"
+  }
+  Write-Host "Restricted .env to your account (and SYSTEM)."
+} catch {
+  Write-Warning "Could not restrict .env to your account: $($_.Exception.Message)"
+  Write-Warning "It holds two secrets. Fix it by hand: icacls `"$envPath`" /inheritance:r /grant:r `"$($env:USERNAME):F`""
+}
+# END env-acl
+
 $arch = $env:PROCESSOR_ARCHITECTURE
 switch ($arch) {
   "ARM64" { $asset = "collector_windows_arm64.exe" }
