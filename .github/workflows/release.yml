@@ -1,20 +1,52 @@
 # Release pipeline (GO-PORT §3): every green push to main publishes a
-# GitHub Release with four platform binaries + SHA256SUMS. Collectors
-# self-update from these; a red test = no release = fleet unchanged.
+# GitHub Release with seven platform binaries, the pinned installers,
+# VERSION, SHA256SUMS and SHA256SUMS.sig. Collectors self-update from
+# these; a red test = no release = fleet unchanged.
+#
+# Signing (issue #5, SECURITY.md): SHA256SUMS is signed with the
+# COLLECTOR_SIGNING_KEY secret, and the build verifies what it is about
+# to publish with the exact verifier collectors run and the public key
+# compiled into these binaries, so a secret that does not match the key
+# fails here, never on the fleet. The build refuses outright while that
+# key is still the placeholder or the secret is missing.
+#
+# Actions are pinned to full commit SHAs; the tag each SHA was is in the
+# comment beside it. To move one, resolve the new tag with
+# `git ls-remote --tags https://github.com/actions/<name>` and update
+# the SHA and the comment together.
 name: release
 on:
   push:
     branches: [main]
-permissions:
-  contents: write
+# Nothing by default; the job below asks for exactly what it needs.
+permissions: {}
+# One release at a time, never cancelled half-published.
+concurrency:
+  group: release
+  cancel-in-progress: false
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # gh release create; nothing else
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # No token left in .git/config for the test and build steps.
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.24"
+      - name: refuse to build with the placeholder release key
+        run: REQUIRE_RELEASE_KEY=1 go test ./internal/v2 -run '^TestCompiledReleaseKey$' -count=1 -v
+      - name: refuse to build without the signing secret
+        env:
+          HAS_SIGNING_KEY: ${{ secrets.COLLECTOR_SIGNING_KEY != '' }}
+        run: |
+          if [ "$HAS_SIGNING_KEY" != "true" ]; then
+            echo "::error::The COLLECTOR_SIGNING_KEY secret is not set; see SECURITY.md. No unsigned release is published."
+            exit 1
+          fi
       - run: go vet ./... && go test ./...
       - name: build matrix
         run: |
@@ -40,7 +72,30 @@ jobs:
           build linux  arm   "7" linux_armv7
           build windows amd64 "" windows_amd64.exe
           build windows arm64 "" windows_arm64.exe
-          (cd dist && shasum -a 256 collector_* > SHA256SUMS)
+          # The installers a release publishes install THIS release, and
+          # carry its binaries' checksums (scripts/pin-installers.sh).
+          (cd dist && sha256sum collector_*) > "$RUNNER_TEMP/binsums"
+          sh scripts/pin-installers.sh "$VERSION" "$RUNNER_TEMP/binsums" dist
+          cp scripts/run-forever.sh dist/
+          # VERSION's line in the signed SHA256SUMS binds these hashes to
+          # this version: a signature cannot be replayed under another.
+          printf '%s\n' "$VERSION" > dist/VERSION
+          (cd dist && sha256sum collector_* install.sh install.ps1 run-forever.sh VERSION > SHA256SUMS)
+      - name: sign SHA256SUMS
+        env:
+          COLLECTOR_SIGNING_KEY: ${{ secrets.COLLECTOR_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key="$RUNNER_TEMP/release-signing-key"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$COLLECTOR_SIGNING_KEY" > "$key"
+          ssh-keygen -Y sign -q -f "$key" -n elixir-mcp-collector-release dist/SHA256SUMS
+          test -s dist/SHA256SUMS.sig
+      - name: verify the release as a collector and an operator would
+        # The collector's own verifier, with the key compiled into these
+        # binaries, over every file; and stock ssh-keygen -Y verify.
+        run: RELEASE_DIR="$PWD/dist" go test ./internal/v2 -run '^TestReleaseDirVerifies$' -count=1 -v
       - name: publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -60,8 +115,11 @@ jobs:
             "" \
             "Not yet named as the update authority, so no collector installs it." \
             "When Elixir MCP names this version, this release is promoted to Latest." \
+            "" \
+            "SHA256SUMS is signed (SHA256SUMS.sig); SECURITY.md says how to verify it." \
             > notes.md
           gh release create "$VERSION" dist/* \
+            --repo "${{ github.repository }}" \
             --title "$VERSION" \
             --prerelease \
             --notes-file notes.md

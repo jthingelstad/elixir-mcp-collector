@@ -5,15 +5,19 @@
 # the sandbox has to allow - and ROLL BACK a release that cannot start:
 # a candidate that passes the updater's self-check but crashes at
 # startup must end with the previous binary running and its version
-# refused. It installs the unit the way a
+# refused. Every release it serves is signed the way release.yml signs
+# one (a throwaway key, compiled into these builds for the test), and a
+# release whose signature does not verify must be refused without
+# touching the binary (issue #5). It installs the unit the way a
 # one-directory-per-instance operator does (elixir-collector@.service
 # with %i in the three paths), under /home so ProtectHome is exercised
 # too, then checks that exit 2 stops the unit instead of looping.
 #
-# Needs systemd as PID 1, root or sudo, go and python3. CI runs it on
-# ubuntu-latest and ubuntu-24.04-arm. The "hub" is python's static file server on 127.0.0.1:
-# /config names a newer build of this same checkout; nothing leaves the
-# machine and no real token exists.
+# Needs systemd as PID 1, root or sudo, go, python3 and ssh-keygen. CI
+# runs it on ubuntu-latest and ubuntu-24.04-arm. The "hub" is python's
+# static file server on 127.0.0.1: /config names a newer build of this
+# same checkout, served as a release at /releases/download/<version>/;
+# nothing leaves the machine and no real token or key exists.
 #
 #   sh scripts/test-systemd-unit.sh
 
@@ -31,12 +35,20 @@ DIR="$HOME_DIR/$INST"
 UNIT="elixir-collector-smoke@.service"
 UNIT_INST="elixir-collector-smoke@$INST.service"
 PORT=18787
-KEY="go-linux-$(cd "$REPO" && go env GOARCH)"
+GOARCH="$(cd "$REPO" && go env GOARCH)"
+KEY="go-linux-$GOARCH"
+ASSET="collector_linux_$GOARCH"
+# Above the updater's install floor (internal/v2/trust.go).
+V_OLD=v9.9.1-smoke
+V_NEW=v9.9.2-smoke
+V_BAD=v9.9.3-smoke
+V_FORGED=v9.9.4-smoke
 CR_TOKEN="eyJsmoke.crsecretcrsecret.sig"
 API_TOKEN="emcg_smokesecretsmokesecret"
 
 WEB="$(mktemp -d "${TMPDIR:-/tmp}/systemd-test.XXXXXX")" || exit 1
 chmod 755 "$WEB"
+KEYS="$(mktemp -d "${TMPDIR:-/tmp}/systemd-test-keys.XXXXXX")" || exit 1  # never served
 PY_PID=""
 cleanup() {
   $SUDO systemctl stop "$UNIT_INST" >/dev/null 2>&1
@@ -45,7 +57,7 @@ cleanup() {
   $SUDO systemctl reset-failed >/dev/null 2>&1
   [ -n "$PY_PID" ] && kill "$PY_PID" 2>/dev/null
   id "$SVC_USER" >/dev/null 2>&1 && $SUDO userdel -r "$SVC_USER" >/dev/null 2>&1
-  rm -rf "$WEB"
+  rm -rf "$WEB" "$KEYS"
 }
 trap cleanup EXIT INT TERM
 
@@ -64,19 +76,45 @@ wait_for() { # wait_for <seconds> <journal substring>
 }
 sha() { sha256sum "$1" | awk '{print $1}'; }
 
-# --- the two builds and the fake hub ---
-(cd "$REPO" && CGO_ENABLED=0 go build -ldflags "-X main.version=v0.0.1-smoke" -o "$WEB/old" ./cmd/collector) || exit 1
-(cd "$REPO" && CGO_ENABLED=0 go build -ldflags "-X main.version=v0.0.2-smoke" -o "$WEB/new" ./cmd/collector) || exit 1
+# --- a throwaway release key, the builds, and the fake hub ---
+ssh-keygen -q -t ed25519 -N '' -C smoke-release-key -f "$KEYS/release-key" || exit 1
+ssh-keygen -q -t ed25519 -N '' -C forger -f "$KEYS/forged-key" || exit 1
+TRUST="-X 'github.com/jthingelstad/elixir-mcp-collector/internal/v2.releasePublicKeys=$(cat "$KEYS/release-key.pub")'"
+(cd "$REPO" && CGO_ENABLED=0 go build -ldflags "-X main.version=$V_OLD $TRUST" -o "$WEB/old" ./cmd/collector) || exit 1
+(cd "$REPO" && CGO_ENABLED=0 go build -ldflags "-X main.version=$V_NEW $TRUST" -o "$WEB/new" ./cmd/collector) || exit 1
+(cd "$REPO" && CGO_ENABLED=0 go build -ldflags "-X main.version=$V_FORGED $TRUST" -o "$WEB/forged" ./cmd/collector) || exit 1
 # The bad release: passes `version`, then panics before any answer from
 # the hub (internal/v2/testdata/fakecollector, with the real v2.Guard).
-(cd "$REPO" && CGO_ENABLED=0 go build -ldflags "-X main.version=v0.0.3-smoke -X main.mode=crash" -o "$WEB/bad" ./internal/v2/testdata/fakecollector) || exit 1
+(cd "$REPO" && CGO_ENABLED=0 go build -ldflags "-X main.version=$V_BAD -X main.mode=crash" -o "$WEB/bad" ./internal/v2/testdata/fakecollector) || exit 1
 NEW_SHA="$(sha "$WEB/new")"
 BAD_SHA="$(sha "$WEB/bad")"
-mkdir -p "$WEB/api/collector"
-cat > "$WEB/api/collector/config" <<J
+
+# publish <version> <binary> [forged]: a release directory the way
+# release.yml writes one - the asset, VERSION, SHA256SUMS and its
+# signature. "forged" signs with a key the builds do not trust.
+publish() {
+  rel="$WEB/releases/download/$1"
+  mkdir -p "$rel"
+  cp "$2" "$rel/$ASSET"
+  printf '%s\n' "$1" > "$rel/VERSION"
+  (cd "$rel" && sha256sum "$ASSET" VERSION > SHA256SUMS)
+  signer="$KEYS/release-key"
+  [ "${3:-}" = forged ] && signer="$KEYS/forged-key"
+  ssh-keygen -Y sign -q -f "$signer" -n elixir-mcp-collector-release "$rel/SHA256SUMS" || exit 1
+}
+publish "$V_NEW" "$WEB/new"
+publish "$V_BAD" "$WEB/bad"
+publish "$V_FORGED" "$WEB/forged" forged
+FORGED_SHA="$(sha "$WEB/forged")"
+# name <version> <sha>: what the hub's /config names for this platform.
+name() {
+  cat > "$WEB/api/collector/config" <<J
 {"pacing_ms":1500,"gateway":{"name":"smoke","channel":"bulk","status":"active"},
- "update":{"$KEY":{"version":"v0.0.2-smoke","sha256":"$NEW_SHA","url":"http://127.0.0.1:$PORT/new"}}}
+ "update":{"$KEY":{"version":"$1","sha256":"$2","url":"http://127.0.0.1:$PORT/releases/download/$1/$ASSET"}}}
 J
+}
+mkdir -p "$WEB/api/collector"
+name "$V_NEW" "$NEW_SHA"
 python3 -m http.server --bind 127.0.0.1 --directory "$WEB" "$PORT" >"$WEB/http.log" 2>&1 &
 PY_PID=$!
 i=0; until curl -fs "http://127.0.0.1:$PORT/api/collector/config" >/dev/null; do
@@ -112,19 +150,21 @@ fi
 $SUDO systemctl start "$UNIT_INST"
 
 # --- 1. starts inside the sandbox, on the old build ---
-if wait_for 20 "version=v0.0.1-smoke"; then ok "the collector starts under the hardened unit"
+if wait_for 20 "version=$V_OLD"; then ok "the collector starts under the hardened unit"
 else no "the collector starts under the hardened unit" "$(journal | tail -20)"; fi
 
 # --- 2. self-update writes the new binary through ReadWritePaths ---
-if wait_for 60 "version=v0.0.2-smoke"; then ok "self-update replaces the binary and systemd restarts into it"
+if wait_for 60 "version=$V_NEW"; then ok "self-update replaces the binary and systemd restarts into it"
 else no "self-update replaces the binary and systemd restarts into it" "$(journal | tail -20)"; fi
 if [ "$($SUDO sha256sum "$DIR/collector" | awk '{print $1}')" = "$NEW_SHA" ]; then ok "the installed binary is the named build"
 else no "the installed binary is the named build"; fi
 if journal | grep -qF "self-update failed"; then no "no self-update failure in the log" "$(journal | grep -F 'self-update failed')"
 else ok "no self-update failure in the log"; fi
+if journal | grep -qF "$V_NEW is signed by release key SHA256:"; then ok "the release's signature was verified before the install"
+else no "the release's signature was verified before the install" "$(journal | tail -20)"; fi
 left="$($SUDO find "$DIR" -name '.collector-update*' | head -1)"
 if [ -z "$left" ]; then ok "no update temp file is left behind"; else no "no update temp file is left behind" "$left"; fi
-if wait_for 30 "update to v0.0.2-smoke proven"; then ok "the new build's first answer from the hub proves it"
+if wait_for 30 "update to $V_NEW proven"; then ok "the new build's first answer from the hub proves it"
 else no "the new build's first answer from the hub proves it" "$(journal | tail -20)"; fi
 if $SUDO test -e "$DIR/collector.prev" || $SUDO test -e "$DIR/collector.trial"; then
   no "proof removes the previous binary and the trial" "$($SUDO ls -la "$DIR")"
@@ -148,17 +188,34 @@ else
   ok "neither token appears in the journal"
 fi
 
-# --- 6. a release that crashes at startup is rolled back ---
-cat > "$WEB/api/collector/config" <<J
-{"pacing_ms":1500,"gateway":{"name":"smoke","channel":"bulk","status":"active"},
- "update":{"$KEY":{"version":"v0.0.3-smoke","sha256":"$BAD_SHA","url":"http://127.0.0.1:$PORT/bad"}}}
-J
+# --- 6. a release signed by any other key is refused, untouched ---
+name "$V_FORGED" "$FORGED_SHA"
 $SUDO systemctl restart "$UNIT_INST"   # the hourly config check, now
-if wait_for 30 "gateway up (fake) version=v0.0.3-smoke"; then ok "the bad release passes the self-check and is installed"
+if wait_for 30 "self-update REFUSED $V_FORGED"; then ok "a release signed by an untrusted key is refused"
+else no "a release signed by an untrusted key is refused" "$(journal | tail -20)"; fi
+if [ "$($SUDO sha256sum "$DIR/collector" | awk '{print $1}')" = "$NEW_SHA" ]; then ok "the refused release never touched the binary"
+else no "the refused release never touched the binary"; fi
+if grep -qF "GET /releases/download/$V_FORGED/$ASSET " "$WEB/http.log"; then no "the refused release's binary was never downloaded"
+else ok "the refused release's binary was never downloaded"; fi
+if $SUDO test -e "$DIR/collector.refused" || $SUDO test -e "$DIR/collector.trial"; then
+  no "a signature failure leaves no refusal or trial" "$($SUDO ls -la "$DIR")"
+else
+  ok "a signature failure leaves no refusal or trial"
+fi
+
+# --- 7. a release that crashes at startup is rolled back ---
+# The rollback needs every start systemd allows (5 in 10 s by default:
+# update exit, three crashes, the restored build). Let the window of the
+# restart in step 6 pass first, or it counts against them.
+sleep 11
+$SUDO systemctl reset-failed "$UNIT_INST" >/dev/null 2>&1
+name "$V_BAD" "$BAD_SHA"
+$SUDO systemctl restart "$UNIT_INST"   # the hourly config check, now
+if wait_for 30 "gateway up (fake) version=$V_BAD"; then ok "the bad release passes the self-check and is installed"
 else no "the bad release passes the self-check and is installed" "$(journal | tail -20)"; fi
-if wait_for 120 "REFUSING update to v0.0.3-smoke"; then ok "after the rollback, the restored build refuses the bad version"
+if wait_for 120 "REFUSING update to $V_BAD"; then ok "after the rollback, the restored build refuses the bad version"
 else no "after the rollback, the restored build refuses the bad version" "$(journal | tail -30)"; fi
-if journal | grep -qF "ROLLED BACK: v0.0.3-smoke crashed 3 times"; then ok "the rollback is logged loudly"
+if journal | grep -qF "ROLLED BACK: $V_BAD crashed 3 times"; then ok "the rollback is logged loudly"
 else no "the rollback is logged loudly" "$(journal | tail -30)"; fi
 # A Go panic exits 2, which RestartPreventExitStatus=2 would take as a
 # configuration error and stop on; a trial panic must die by SIGABRT.
@@ -170,24 +227,24 @@ else no "the previous build is back in place"; fi
 sleep 3
 state="$($SUDO systemctl show -p ActiveState --value "$UNIT_INST")"
 last_up="$(journal | grep -F "gateway up" | tail -1)"
-after_rollback="$(journal | sed -n '/ROLLED BACK/,$p' | grep -cF "version=v0.0.2-smoke")"
-if [ "$state" = "active" ] && [ "$after_rollback" -ge 1 ] && printf '%s' "$last_up" | grep -qF "version=v0.0.2-smoke"; then
+after_rollback="$(journal | sed -n '/ROLLED BACK/,$p' | grep -cF "version=$V_NEW")"
+if [ "$state" = "active" ] && [ "$after_rollback" -ge 1 ] && printf '%s' "$last_up" | grep -qF "version=$V_NEW"; then
   ok "the previous build is running"
 else
   no "the previous build is running" "state=$state last start: $last_up"
 fi
-if $SUDO grep -qF '"version":"v0.0.3-smoke"' "$DIR/collector.refused" 2>/dev/null; then ok "the refusal names exactly the bad version"
+if $SUDO grep -qF "\"version\":\"$V_BAD\"" "$DIR/collector.refused" 2>/dev/null; then ok "the refusal names exactly the bad version"
 else no "the refusal names exactly the bad version" "$($SUDO cat "$DIR/collector.refused" 2>&1)"; fi
 if $SUDO test -e "$DIR/collector.prev" || $SUDO test -e "$DIR/collector.trial"; then
   no "no trial or previous binary is left after the rollback" "$($SUDO ls -la "$DIR")"
 else
   ok "no trial or previous binary is left after the rollback"
 fi
-downloads="$(grep -c 'GET /bad ' "$WEB/http.log")"
+downloads="$(grep -cF "GET /releases/download/$V_BAD/$ASSET " "$WEB/http.log")"
 if [ "$downloads" = "1" ]; then ok "the refused version is not downloaded again"
 else no "the refused version is not downloaded again" "$downloads downloads"; fi
 
-# --- 7. exit 2 stops the unit rather than restart-looping ---
+# --- 8. exit 2 stops the unit rather than restart-looping ---
 $SUDO systemctl stop "$UNIT_INST"
 printf 'ELIXIR_API_BASE=http://127.0.0.1:%s/api/collector\n' "$PORT" | $SUDO tee "$DIR/.env" >/dev/null
 $SUDO systemctl start "$UNIT_INST"

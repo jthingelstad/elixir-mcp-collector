@@ -1,17 +1,29 @@
 #!/bin/sh
 # One-command install for the Elixir MCP collector (Go binary).
-# Downloads the latest release binary for this platform, drops it next
-# to your .env, and installs a supervisor service (launchd on macOS,
-# systemd on Linux) that keeps it running and restarts it on self-update.
+# Downloads the release binary for this platform, verifies its SHA-256,
+# drops it next to your .env, and installs a supervisor service (launchd
+# on macOS, systemd on Linux) that keeps it running and restarts it on
+# self-update.
 #
-#   sh scripts/install.sh        # from a checkout, OR
-#   curl -fsSL https://raw.githubusercontent.com/jthingelstad/elixir-mcp-collector/main/scripts/install.sh | sh
+# The copy published with each release is PINNED (scripts/pin-installers.sh):
+# it installs that release's binary, checked against the checksums baked
+# in below, so once you have verified this file against the release's
+# signed SHA256SUMS (README, "3. Run it") nothing it downloads needs
+# trusting. The copy in the repository is unpinned: it resolves the
+# Latest release and checks the binary against that release's
+# SHA256SUMS.
+#
+#   sh install.sh                # the release copy, verified first, OR
+#   sh scripts/install.sh        # from a checkout
 #
 # Requires: a .env in the current directory (see .env.example) with
 # CR_API_TOKEN and ELIXIR_API_TOKEN. No Node, no AWS, no git needed.
 set -eu
 
 REPO="jthingelstad/elixir-mcp-collector"
+# Filled in by release.yml in the copy each release publishes; empty here.
+PINNED_TAG=""
+PINNED_SUMS=""
 DIR="$(pwd)"
 [ -f "$DIR/.env" ] || { echo "No .env here. Copy .env.example to .env and fill in CR_API_TOKEN + ELIXIR_API_TOKEN first."; exit 1; }
 
@@ -42,13 +54,17 @@ case "$os-$arch" in
      exit 1 ;;
 esac
 
-# Resolve the release ONCE and pull both files from that exact tag.
-# Fetching the binary and its checksums from /latest/ separately means a
-# promotion between the two requests hands you a checksum file for a
-# different build.
-tag="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-  | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-[ -n "$tag" ] || { echo "Could not resolve the latest release of $REPO. Check your network and try again."; exit 1; }
+if [ -n "$PINNED_TAG" ]; then
+  tag="$PINNED_TAG"
+else
+  # Resolve the release ONCE and pull both files from that exact tag.
+  # Fetching the binary and its checksums from /latest/ separately means
+  # a promotion between the two requests hands you a checksum file for a
+  # different build.
+  tag="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
+    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+  [ -n "$tag" ] || { echo "Could not resolve the latest release of $REPO. Check your network and try again."; exit 1; }
+fi
 base="https://github.com/$REPO/releases/download/$tag"
 
 echo "Downloading $asset ($tag)..."
@@ -61,7 +77,12 @@ trap cleanup EXIT INT TERM
 # not a degraded install, it is an unknown binary, and it must never
 # reach the point of replacing one that is already working.
 curl -fSL "$base/$asset" -o "$tmp" || { echo "Download failed: $base/$asset"; exit 1; }
-curl -fsSL "$base/SHA256SUMS" -o "$sums" || { echo "Could not download SHA256SUMS for $tag - refusing to install unverified."; exit 1; }
+if [ -n "$PINNED_SUMS" ]; then
+  # The checksums came with this installer, from the same signed release.
+  printf '%s\n' "$PINNED_SUMS" > "$sums"
+else
+  curl -fsSL "$base/SHA256SUMS" -o "$sums" || { echo "Could not download SHA256SUMS for $tag - refusing to install unverified."; exit 1; }
+fi
 
 want="$(awk -v a="$asset" '$2 == a || $2 == "*" a { print $1 }' "$sums")"
 lines="$(printf '%s\n' "$want" | grep -c '[0-9a-f]' || true)"

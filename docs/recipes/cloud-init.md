@@ -8,8 +8,9 @@ page is the whole procedure and the provider pages are short deltas.
 The file is [`cloud-init.yaml`](cloud-init.yaml). Read it once; it is
 short. It creates an unprivileged `collector` user, writes your two
 secrets to `/opt/elixir-collector/.env` at mode 600, installs the
-collector binary with the repository's own installer (SHA-256-verified
-against the release), installs a hardened systemd unit (the same
+collector binary with the repository's own installer (run only after
+it checks out against the release's signature, and itself checking the
+binary against the release's checksums), installs a hardened systemd unit (the same
 sandbox as `scripts/elixir-collector.service`), starts it, and runs
 `collector doctor` so the cloud-init log ends with a verdict.
 
@@ -68,11 +69,17 @@ sudo systemctl restart elixir-collector
 Exit code 2 from the collector (no `.env`) stops the service rather than
 looping, so a box booted without the file simply waits for you.
 
-**Pin, don't float.** The YAML fetches the installer at a release tag
-(`TAG=`), and the installer verifies the binary it downloads against
-that release's `SHA256SUMS`. Keep the tag: a rebuild next year then does
-what this one did. The running binary self-updates to whatever the
-server names, so pinning costs you nothing in currency.
+**Verified before it runs.** The YAML downloads the installer from the
+release Elixir MCP names (`TAG="latest"`) together with that release's
+signed `SHA256SUMS`. It runs the installer only once `ssh-keygen`
+accepts the signature against the release key written into the YAML,
+and the installer matches `SHA256SUMS`. The installer is pinned to its
+own release and checks the binary against checksums baked into it
+([`SECURITY.md`](../../SECURITY.md)). Set `TAG` to a release such as
+`v3.0.0` to reproduce one install exactly; the running binary
+self-updates to whatever the server names either way. The check needs
+OpenSSH 8.1 or newer, which rules out Oracle Linux 8. Pick the Oracle
+Linux 9 or Ubuntu image.
 
 ## Variations
 

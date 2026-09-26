@@ -302,13 +302,21 @@ func TestInterruptedInstallLeavesTheOldBinary(t *testing.T) {
 
 // An update download over the bound is refused before it is hashed.
 func TestOversizedUpdateIsRefused(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	dir, self := target(t)
+	rel := signedRelease(t, "v9.0.0", []byte("the real binary"))
+	rel.binary = func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", "999999999999")
 		w.WriteHeader(200)
-	}))
-	defer srv.Close()
-	c := testClient(srv.URL, nil)
-	if err := c.applyUpdate(srv.URL+"/bin", "00", "v9"); err == nil || !strings.Contains(err.Error(), "download over") {
+	}
+	c := testClient("http://127.0.0.1:1", nil)
+	c.Version, c.Bin, c.releaseKeys = "v8.0.0", self, testKeyLine(t)
+	if err := c.applyUpdate(rel.URL, rel.sha, "v9.0.0"); err == nil || !strings.Contains(err.Error(), "download over") {
 		t.Fatalf("got %v", err)
+	}
+	if got, _ := os.ReadFile(self); string(got) != "old binary" {
+		t.Fatalf("%q", got)
+	}
+	if l := leftovers(t, dir); len(l) != 0 {
+		t.Fatalf("%v", l)
 	}
 }

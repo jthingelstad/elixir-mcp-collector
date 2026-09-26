@@ -8,7 +8,19 @@ a launchd agent the installer registers.
 mkdir -p ~/elixir-collector && cd ~/elixir-collector
 printf 'CR_API_TOKEN=%s\nELIXIR_API_TOKEN=%s\n' "your-cr-key" "emcg_your-token" > .env
 chmod 600 .env
-curl -fsSL https://raw.githubusercontent.com/jthingelstad/elixir-mcp-collector/main/scripts/install.sh | sh
+```
+
+Then the installer, checked against the release signature before it
+runs (README, "3. Run it", explains each line):
+
+```sh
+base=https://github.com/jthingelstad/elixir-mcp-collector/releases/latest/download
+curl -fsSL -O "$base/install.sh" -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.sig" &&
+echo 'elixir-mcp-collector-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFvN1mZGTcFXSGnIXf8h33cxAhvrHPYn80BO5FkELh28' > allowed_signers &&
+ssh-keygen -Y verify -f allowed_signers -I elixir-mcp-collector-release \
+  -n elixir-mcp-collector-release -s SHA256SUMS.sig < SHA256SUMS &&
+grep ' install.sh$' SHA256SUMS | shasum -a 256 -c - &&
+sh install.sh
 ./collector doctor
 ```
 

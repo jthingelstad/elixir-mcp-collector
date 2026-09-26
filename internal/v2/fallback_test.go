@@ -7,8 +7,6 @@ package v2
 // real restarts, so on Windows they exercise renaming a running .exe.
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -23,9 +21,12 @@ import (
 
 // No waiting between trial starts, and the test process itself keeps
 // Go's usual panic (the fakes exercise the real one).
+// The fakes are v2.0.x, below the real install floor (trust.go), which
+// has its own test.
 func init() {
 	trialBackoff = 0
 	enterCrashMode = func() {}
+	installFloor = "v0.0.0"
 }
 
 var (
@@ -92,23 +93,19 @@ func installed(t *testing.T, data []byte) (dir, self string) {
 	return dir, realPath(self)
 }
 
-// releaseServer serves data as the update download and counts requests.
-func releaseServer(t *testing.T, data []byte) (*httptest.Server, *int, string) {
+// releaseServer serves data as a signed release of version (trust_test.go)
+// and counts the binary's downloads. URL is the asset URL the hub names.
+func releaseServer(t *testing.T, version string, data []byte) (*testRelease, *int, string) {
 	t.Helper()
-	hits := new(int)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*hits++
-		_, _ = w.Write(data)
-	}))
-	t.Cleanup(srv.Close)
-	sum := sha256.Sum256(data)
-	return srv, hits, hex.EncodeToString(sum[:])
+	rel := signedRelease(t, version, data)
+	return rel, &rel.binaryHits, rel.sha
 }
 
 func updater(t *testing.T, self, version string, logs *[]string) *Client {
 	c := testClient("http://127.0.0.1:1", logs)
 	c.Version = version
 	c.Bin = self
+	c.releaseKeys = testKeyLine(t)
 	return c
 }
 
@@ -171,7 +168,7 @@ func TestUpdateKeepsThePreviousBinaryAndOpensATrial(t *testing.T) {
 	old := fake(t, "v2.0.1", "prove")
 	cand := fake(t, "v2.0.2", "prove")
 	dir, self := installed(t, old)
-	srv, _, sha := releaseServer(t, cand)
+	srv, _, sha := releaseServer(t, "v2.0.2", cand)
 	var logs []string
 	c := updater(t, self, "v2.0.1", &logs)
 	if err := c.applyUpdate(srv.URL, sha, "v2.0.2"); err != nil {
@@ -201,7 +198,7 @@ func TestUpdateCopiesThePreviousBinaryWithoutHardLinks(t *testing.T) {
 	defer func() { linkFile = os.Link }()
 	old := fake(t, "v2.0.1", "prove")
 	_, self := installed(t, old)
-	srv, _, sha := releaseServer(t, fake(t, "v2.0.2", "prove"))
+	srv, _, sha := releaseServer(t, "v2.0.2", fake(t, "v2.0.2", "prove"))
 	if err := updater(t, self, "v2.0.1", nil).applyUpdate(srv.URL, sha, "v2.0.2"); err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +215,7 @@ func TestFailedSelfCheckLeavesEverythingAsItWas(t *testing.T) {
 	old := fake(t, "v2.0.1", "prove")
 	dir, self := installed(t, old)
 	// Signed off by the hub's hash, but it is not the version named.
-	srv, _, sha := releaseServer(t, fake(t, "v2.0.9", "prove"))
+	srv, _, sha := releaseServer(t, "v2.0.2", fake(t, "v2.0.9", "prove"))
 	err := updater(t, self, "v2.0.1", nil).applyUpdate(srv.URL, sha, "v2.0.2")
 	if err == nil || !strings.Contains(err.Error(), "self-check") {
 		t.Fatalf("got %v", err)
@@ -242,7 +239,7 @@ func TestFailedSelfCheckLeavesEverythingAsItWas(t *testing.T) {
 func TestInterruptedSwapLeavesTheOldBinaryAndNoTrial(t *testing.T) {
 	old := fake(t, "v2.0.1", "prove")
 	dir, self := installed(t, old)
-	srv, _, sha := releaseServer(t, fake(t, "v2.0.2", "prove"))
+	srv, _, sha := releaseServer(t, "v2.0.2", fake(t, "v2.0.2", "prove"))
 	renameFile = func(from, to string) error {
 		if strings.Contains(filepath.Base(from), ".collector-update-") {
 			return errors.New("power cut")
@@ -435,7 +432,7 @@ func refusedAt(t *testing.T, version string) (self string) {
 
 func TestRestoredBinaryRefusesTheFailedVersionOnly(t *testing.T) {
 	self := refusedAt(t, "v2.0.2")
-	srv, hits, sha := releaseServer(t, []byte("bad"))
+	srv, hits, sha := releaseServer(t, "v2.0.2", []byte("bad"))
 	var logs []string
 	c := updater(t, self, "v2.0.1", &logs)
 	for i := 0; i < 3; i++ { // hourly config refreshes
@@ -495,7 +492,7 @@ func TestEndToEndCrashingReleaseIsRolledBack(t *testing.T) {
 	old := fake(t, "v2.0.1", "prove")
 	bad := fake(t, "v2.0.2", "crash")
 	dir, self := installed(t, old)
-	srv, hits, sha := releaseServer(t, bad)
+	srv, hits, sha := releaseServer(t, "v2.0.2", bad)
 	var logs []string
 	if err := updater(t, self, "v2.0.1", &logs).applyUpdate(srv.URL, sha, "v2.0.2"); err != nil {
 		t.Fatal(err)
@@ -545,7 +542,7 @@ func TestEndToEndOutageThenProof(t *testing.T) {
 	old := fake(t, "v2.0.1", "prove")
 	cand := fake(t, "v2.0.2", "prove")
 	_, self := installed(t, old)
-	srv, _, sha := releaseServer(t, cand)
+	srv, _, sha := releaseServer(t, "v2.0.2", cand)
 	if err := updater(t, self, "v2.0.1", nil).applyUpdate(srv.URL, sha, "v2.0.2"); err != nil {
 		t.Fatal(err)
 	}
@@ -572,7 +569,7 @@ func TestEndToEndOutageThenProof(t *testing.T) {
 // refusal stands, and nothing is downloaded.
 func TestAnEmptyNamedVersionKeepsTheRefusal(t *testing.T) {
 	self := refusedAt(t, "v2.0.2")
-	srv, hits, sha := releaseServer(t, []byte("bad"))
+	srv, hits, sha := releaseServer(t, "v2.0.2", []byte("bad"))
 	var logs []string
 	updater(t, self, "v2.0.1", &logs).updateTo("", srv.URL, sha)
 	if readRefusal(self) != "v2.0.2" {

@@ -1,14 +1,15 @@
 #cloud-config
 # Elixir MCP collector - one paste at instance creation, and the box
 # comes up collecting. Works on any Linux cloud VM with cloud-init
-# (Oracle Linux, Ubuntu, Debian, Rocky, Fedora...): it needs curl, a
-# sha256 tool and systemd, all of which those images have.
+# (Oracle Linux 9, Ubuntu, Debian, Rocky, Fedora...): it needs curl, a
+# sha256 tool, systemd and ssh-keygen from OpenSSH 8.1 or newer, all of
+# which those images have (Oracle Linux 8's OpenSSH 8.0 is too old).
 #
 # Before pasting, replace the two secrets in .env below. That is the
 # whole configuration - everything else the server hands the collector
 # at startup. Read docs/recipes/cloud-init.md for the two caveats
-# (secrets in user data are readable from inside the instance; pin the
-# installer tag for rebuilds).
+# (secrets in user data are readable from inside the instance; the
+# installer is checked against the release signature before it runs).
 
 # Keep the image's default login user (on Ubuntu, listing users without
 # `default` silently removes it and you lose SSH). The collector runs
@@ -84,16 +85,29 @@ write_files:
       WantedBy=multi-user.target
 
 runcmd:
-  # Pin the installer to a release tag so a rebuild months from now does
-  # the same thing (the binary it fetches is SHA-256-verified against
-  # that release; once running, the binary self-updates to whatever the
-  # server names, so the pin is about reproducing the install, not
-  # freezing the version).
+  # The installer comes from the release Elixir MCP currently names
+  # (Latest), and runs only once the release's SHA256SUMS verifies
+  # against the release key below and the installer against SHA256SUMS
+  # (issue #5). It installs its own release's binary, checked against
+  # checksums baked into it; once running, the binary self-updates to
+  # whatever the server names. Set TAG to a release (v3.0.0) instead of
+  # "latest" to reproduce one install exactly.
   - |
     set -eu
-    TAG="v2.0.27"
+    TAG="latest"
+    KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFvN1mZGTcFXSGnIXf8h33cxAhvrHPYn80BO5FkELh28"
+    case "$TAG" in
+      latest) base="https://github.com/jthingelstad/elixir-mcp-collector/releases/latest/download" ;;
+      *) base="https://github.com/jthingelstad/elixir-mcp-collector/releases/download/$TAG" ;;
+    esac
     cd /opt/elixir-collector
-    curl -fsSL "https://raw.githubusercontent.com/jthingelstad/elixir-mcp-collector/$TAG/scripts/install.sh" | sh
+    curl -fsSL -O "$base/install.sh" -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.sig"
+    echo "elixir-mcp-collector-release $KEY" > allowed_signers
+    ssh-keygen -Y verify -f allowed_signers -I elixir-mcp-collector-release \
+      -n elixir-mcp-collector-release -s SHA256SUMS.sig < SHA256SUMS
+    grep ' install.sh$' SHA256SUMS | sha256sum -c -
+    sh install.sh
+    rm -f install.sh SHA256SUMS SHA256SUMS.sig allowed_signers
     chown -R collector:collector /opt/elixir-collector
     chmod 600 /opt/elixir-collector/.env
     systemctl daemon-reload

@@ -93,25 +93,63 @@ Windows are there too, and a template for adding yours.
 
 Runs the same on **macOS, Windows, and Linux** — a prebuilt binary
 exists for each (Apple Silicon and Intel Macs; Windows x64 and ARM;
-Linux x64, ARM64, and ARMv7). Pick your platform below; each installer
+Linux x64, ARM64, and ARMv7). Pick your platform below. Each installer
 downloads the right binary, verifies its SHA-256, and registers a
 service that keeps the collector running and restarts it after a
-self-update. Run the command from the directory holding your `.env`.
+self-update. Run the commands from the directory holding your `.env`.
+
+**Check the installer before you run it.** Every release is signed. The
+commands below download the installer from the current release (the
+one Elixir MCP has named) together with the release's `SHA256SUMS` and
+its signature. They check the signature against the release key below
+and the installer against `SHA256SUMS`, and only then run it. The
+installer is pinned to its own release: it installs that release's
+binary and checks it against the checksums built into it, so nothing it
+downloads afterwards needs trusting. The key is also in
+[`SECURITY.md`](SECURITY.md), which explains it.
+
+```
+elixir-mcp-collector-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFvN1mZGTcFXSGnIXf8h33cxAhvrHPYn80BO5FkELh28
+```
+
+The signature check needs OpenSSH 8.1 or newer (`ssh-keygen`), which
+macOS 11+, current Linux distributions and DSM 7 have. Nothing runs
+unless every check passes.
 
 ### macOS
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jthingelstad/elixir-mcp-collector/main/scripts/install.sh | sh
+base=https://github.com/jthingelstad/elixir-mcp-collector/releases/latest/download
+curl -fsSL -O "$base/install.sh" -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.sig" &&
+echo 'elixir-mcp-collector-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFvN1mZGTcFXSGnIXf8h33cxAhvrHPYn80BO5FkELh28' > allowed_signers &&
+ssh-keygen -Y verify -f allowed_signers -I elixir-mcp-collector-release \
+  -n elixir-mcp-collector-release -s SHA256SUMS.sig < SHA256SUMS &&
+grep ' install.sh$' SHA256SUMS | shasum -a 256 -c - &&
+sh install.sh
 ```
 
 Installs a launchd agent. Logs: `~/Library/Logs/elixir-mcp-collector.log`.
 
 ### Windows
 
-In PowerShell:
+In PowerShell (Windows 10 1809+ has `ssh-keygen`; if yours does not,
+add the optional feature **OpenSSH Client**). The whole block runs as
+one, so a failed check stops it:
 
 ```powershell
-irm https://raw.githubusercontent.com/jthingelstad/elixir-mcp-collector/main/scripts/install.ps1 | iex
+& {
+  $ErrorActionPreference = "Stop"
+  $base = "https://github.com/jthingelstad/elixir-mcp-collector/releases/latest/download"
+  foreach ($f in "install.ps1", "SHA256SUMS", "SHA256SUMS.sig") { Invoke-WebRequest "$base/$f" -OutFile $f }
+  Set-Content allowed_signers 'elixir-mcp-collector-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFvN1mZGTcFXSGnIXf8h33cxAhvrHPYn80BO5FkELh28' -Encoding ascii
+  cmd /c "ssh-keygen -Y verify -f allowed_signers -I elixir-mcp-collector-release -n elixir-mcp-collector-release -s SHA256SUMS.sig < SHA256SUMS"
+  if ($LASTEXITCODE -ne 0) { throw "SHA256SUMS is not signed by the release key - not installing" }
+  $want = @(Select-String -Path SHA256SUMS -Pattern ' install\.ps1$')
+  if ($want.Count -ne 1 -or (Get-FileHash install.ps1).Hash.ToLower() -ne $want[0].Line.Split(' ')[0]) {
+    throw "install.ps1 does not match the signed SHA256SUMS - not installing"
+  }
+  powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
+}
 ```
 
 Installs a Scheduled Task (built into Windows — nothing else to
@@ -120,7 +158,13 @@ install) that starts at logon and restarts on failure.
 ### Linux
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jthingelstad/elixir-mcp-collector/main/scripts/install.sh | sh
+base=https://github.com/jthingelstad/elixir-mcp-collector/releases/latest/download
+curl -fsSL -O "$base/install.sh" -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.sig" &&
+echo 'elixir-mcp-collector-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFvN1mZGTcFXSGnIXf8h33cxAhvrHPYn80BO5FkELh28' > allowed_signers &&
+ssh-keygen -Y verify -f allowed_signers -I elixir-mcp-collector-release \
+  -n elixir-mcp-collector-release -s SHA256SUMS.sig < SHA256SUMS &&
+grep ' install.sh$' SHA256SUMS | sha256sum -c - &&
+sh install.sh
 ```
 
 Downloads the binary; then supervise it with systemd — edit `User=`
@@ -170,11 +214,18 @@ printf 'CR_API_TOKEN=%s\nELIXIR_API_TOKEN=%s\n' "your-cr-key" "emcg_your-token" 
 chmod 600 .env
 ```
 
-Then pull the binary and the supervisor into the same folder:
+Then pull the installer and the supervisor into the same folder, check
+both against the signed `SHA256SUMS`, and run the installer (the Linux
+commands above, with `run-forever.sh` added):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jthingelstad/elixir-mcp-collector/main/scripts/install.sh | sh
-curl -fsSL -o run-forever.sh https://raw.githubusercontent.com/jthingelstad/elixir-mcp-collector/main/scripts/run-forever.sh
+base=https://github.com/jthingelstad/elixir-mcp-collector/releases/latest/download
+curl -fsSL -O "$base/install.sh" -O "$base/run-forever.sh" -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.sig" &&
+echo 'elixir-mcp-collector-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFvN1mZGTcFXSGnIXf8h33cxAhvrHPYn80BO5FkELh28' > allowed_signers &&
+ssh-keygen -Y verify -f allowed_signers -I elixir-mcp-collector-release \
+  -n elixir-mcp-collector-release -s SHA256SUMS.sig < SHA256SUMS &&
+grep -E ' (install|run-forever)\.sh$' SHA256SUMS | sha256sum -c - &&
+sh install.sh
 ```
 
 The installer notes that DSM has no user systemd and leaves the binary
@@ -291,11 +342,28 @@ no push: a fleet-wide rollout therefore lands within an hour of the
 server naming a version, not instantly and not in days.
 
 **What it trusts.** The `/config` response names a version, a SHA-256,
-and a download URL for your exact platform. The collector installs that
-build only if the file it downloads matches that SHA-256. It never asks
-GitHub what the newest release is, so a compromised release page alone
-cannot push code to operators — the server is the only authority, and
-it names one build per platform.
+and a download URL for your exact platform. It never asks GitHub what
+the newest release is, so the server is the only authority, and it
+names one build per platform. The collector installs that build only if
+all of these hold, and it checks every one before it runs anything it
+downloaded:
+
+- the URL is this repository's own release asset for exactly that
+  version and platform (`github.com/jthingelstad/elixir-mcp-collector/releases/download/…`),
+  and any redirect goes only to GitHub's download hosts;
+- the release's `SHA256SUMS` is **signed** by the release key built
+  into the collector, and lists both the SHA-256 the server named and
+  that version;
+- the download matches that SHA-256;
+- the version is not below the oldest release the collector will ever
+  install (the floor in `internal/v2/trust.go`).
+
+So a compromised release page cannot push code to operators, because it
+cannot sign. A compromised server cannot either: it can only choose
+among releases this repository published and signed. A release that
+fails a check is refused with a `self-update REFUSED` error in the log,
+and the collector keeps running the version it has. [`SECURITY.md`](SECURITY.md)
+has the details and the key.
 
 **What it needs to reach.** Three hosts, all HTTPS on 443. If your NAS
 or firewall allowlists egress, these are the entries:
@@ -304,21 +372,25 @@ or firewall allowlists egress, these are the entries:
 |---|---|
 | `elixir.poapkings.com` | lease, submit, config |
 | `api.clashroyale.com` | the fetches themselves |
-| the update URL from `/config` | the new binary, today a GitHub release asset (`github.com`, redirecting to `objects.githubusercontent.com`) |
+| `github.com` | the new binary, its `SHA256SUMS` and signature, from this repository's releases |
+| `objects.githubusercontent.com`, `release-assets.githubusercontent.com` | where GitHub redirects those downloads |
 
 **What it looks like in the log.** An update is not a mystery exit. You
 see the collector name it, then hand off to your supervisor:
 
 ```
-{"level":"info","msg":"update authority names v0.1.15; self-updating"}
+{"level":"info","msg":"update authority names v2.0.52; self-updating"}
+{"level":"info","msg":"v2.0.52 is signed by release key SHA256:… and its signed SHA256SUMS covers the hash the hub named"}
 {"level":"info","msg":"updated; exiting for supervisor restart"}
 ```
 
 Then `run-forever: worker exited (0); restarting in 2s`, and a fresh
 startup line on the new version. An exit with no `updated` line above it
 is a crash or the watchdog, not an update. A failed update logs
-`self-update failed:` and keeps collecting on the old binary — an
-update failure never stops collection.
+`self-update failed:` (a download that broke) or `self-update REFUSED`
+(a release that did not prove itself) and keeps collecting on the old
+binary — an update failure never stops collection, and the next hourly
+check tries again.
 
 **What version am I running?** Every startup logs it, so the newest such
 line in your log is the answer:
@@ -330,8 +402,8 @@ line in your log is the answer:
 The collector also sends that version to the server on every call, so
 the maintainer can see your version even when you cannot.
 
-**How it writes the new binary.** The download is checked against the
-SHA-256 first. It is then written to a new file with a random name in
+**How it writes the new binary.** The release's signature is checked
+first, then the download against the SHA-256. It is then written to a new file with a random name in
 the collector's own directory, created fresh so it can never follow a
 link someone left there, and flushed to disk. Before anything else
 changes, the collector **runs that file once** with `collector version`
@@ -445,7 +517,9 @@ The queue-message and API contracts are canonical in the main repo
 `packages/contracts`) and enforced server-side; this repo's tests pin
 the shapes it produces so drift fails here first. `AGENTS.md` is the
 working guide; `docs/GO-PORT.md` is the design history. `main` must stay
-releasable — CI (`go test` and the shell tests) gates it.
+releasable — CI (`go test` and the shell tests) gates it. Security
+reports go through GitHub's private reporting, never a public issue:
+see [`SECURITY.md`](SECURITY.md).
 
 ## License
 
