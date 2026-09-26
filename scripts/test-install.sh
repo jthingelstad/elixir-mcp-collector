@@ -224,6 +224,20 @@ if sh "$SELF_DIR/pin-installers.sh" 'v1.2.3"; rm -rf /' "$TMP/pinmalformed/binsu
 else
   ok "pin-installers.sh refuses a tag that is not a version"
 fi
+mkdir -p "$TMP/pinmalformed/odd\\dir"
+printf '%s  collector_linux_amd64\n' "$GOOD_SHA" > "$TMP/pinmalformed/odd\\dir/binsums"
+if sh "$SELF_DIR/pin-installers.sh" v1.2.3 "$TMP/pinmalformed/odd\\dir/binsums" "$TMP/pinmalformed/odd" >/dev/null 2>&1 &&
+   grep -qF "$GOOD_SHA  collector_linux_amd64" "$TMP/pinmalformed/odd/install.sh"; then
+  ok "a checksum file whose path has backslashes (Windows) is pinned in full"
+else
+  no "a checksum file whose path has backslashes (Windows) is pinned in full"
+fi
+: > "$TMP/pinmalformed/empty"
+if sh "$SELF_DIR/pin-installers.sh" v1.2.3 "$TMP/pinmalformed/empty" "$TMP/pinmalformed/e" >/dev/null 2>&1; then
+  no "an empty checksum file is refused, never pinned as nothing"
+else
+  ok "an empty checksum file is refused, never pinned as nothing"
+fi
 if grep -qx "\$PinnedTag = 'v1.2.3'" "$TMP/pinned/pinned/install.ps1" && grep -qF "$GOOD_SHA  collector_linux_amd64" "$TMP/pinned/pinned/install.ps1"; then
   ok "install.ps1 is pinned the same way"
 else

@@ -33,17 +33,24 @@ pin() {
     n="$(grep -cxF -- "$marker" "$src" || true)"
     [ "$n" = 1 ] || { echo "$src: marker '$marker' found $n times, want 1" >&2; exit 1; }
   done
-  awk -v tagm="$3" -v tagv="$4" -v summ="$5" -v sumsf="$sums_file" -v openq="$6" -v closeq="$7" '
+  # The sums file's path goes through the environment: awk -v would
+  # read the backslashes in a Windows path as escapes.
+  SUMS_FILE="$sums_file" awk -v tagm="$3" -v tagv="$4" -v summ="$5" -v openq="$6" -v closeq="$7" '
     $0 == tagm { print tagv; next }
     $0 == summ {
       printf "%s", openq
       first = 1
-      while ((getline line < sumsf) > 0) { printf "%s%s", (first ? "" : "\n"), line; first = 0 }
+      while ((r = (getline line < ENVIRON["SUMS_FILE"])) > 0) { printf "%s%s", (first ? "" : "\n"), line; first = 0 }
+      if (r < 0 || first) { print "cannot read the checksums from " ENVIRON["SUMS_FILE"] > "/dev/stderr"; exit 1 }
       print closeq
       next
     }
     { print }
   ' "$src" > "$dst"
+  # Never publish a half-pinned installer: every checksum must be in it.
+  while IFS= read -r line; do
+    grep -qF -- "$line" "$dst" || { echo "$dst: missing '$line' after pinning" >&2; exit 1; }
+  done < "$sums_file"
 }
 
 mkdir -p "$out"
