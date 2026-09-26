@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+# The job named `validate` is the check the `main` ruleset requires.
+# Rename both together or merges stop.
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # No AWS credentials in CI, ever. Green main IS the release gate
 # (release.yml builds the binaries). Collectors are pure API clients.
 #
@@ -109,3 +115,16 @@ jobs:
         with:
           go-version: "1.24"
       - run: sh scripts/test-systemd-unit.sh
+  # The one required check: green only when every job above passed, so
+  # the ruleset names one check however the jobs above change. A job
+  # added above must join `needs:` here. No job anywhere else may also
+  # be named `validate`.
+  validate:
+    name: validate
+    if: always()
+    needs: [go, shell, go-platforms, windows-acl, systemd]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: every job passed
+        run: test "${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') }}" = true

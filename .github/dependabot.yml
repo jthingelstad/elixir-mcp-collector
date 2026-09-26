@@ -1,7 +1,7 @@
 # Weekly PRs for the pinned GitHub Actions. The Go module has no
 # dependencies, so the Actions are all there is to watch. Dependabot
 # keeps the SHA pins and their tag comments in step, and each PR goes
-# through main's required checks like any other change.
+# through main's required `validate` check like any other change.
 version: 2
 updates:
   - package-ecosystem: github-actions
