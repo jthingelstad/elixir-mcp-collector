@@ -375,6 +375,40 @@ or firewall allowlists egress, these are the entries:
 | `github.com` | the new binary, its `SHA256SUMS` and signature, from this repository's releases |
 | `objects.githubusercontent.com`, `release-assets.githubusercontent.com` | where GitHub redirects those downloads |
 
+**What it tells Elixir MCP about itself.** Every request to Elixir MCP
+(config, lease, submit, and doctor's config read) carries the bearer
+token and three headers describing the build, none of them secret:
+
+| Header | What it is |
+|---|---|
+| `x-collector-version` | the version the binary was built as (`dev` for a local build) |
+| `x-collector-binary-sha256` | the SHA-256 of the running binary, computed once at startup |
+| `x-collector-release-key` | the `SHA256:` fingerprint of the release key built in (two, comma-separated, during a key rotation) |
+
+The key fingerprint alone proves nothing, since the key is in the
+source and any build carries it. What lets Elixir MCP show that a
+collector runs a signed release is the binary's hash matching the
+signed hash it holds for that version and platform. Local builds send
+all three too; Elixir MCP decides what they mean. This is what the
+collector says about itself, not an attestation
+([`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md)).
+
+**When Elixir MCP refuses it as too old.** Below the minimum version
+Elixir MCP accepts, lease and submit answer HTTP 426
+`client_too_old`, while config still answers, because config is how a
+stale collector updates. The collector logs one error naming its
+version, the minimum and Elixir MCP's hint, then re-reads config at
+once and installs the release it names:
+
+```
+{"level":"error","msg":"the hub refuses this collector as too old (HTTP 426 client_too_old on lease): version v3.0.1, min_client_version v3.0.7 - …; re-reading /config to self-update"}
+```
+
+It keeps checking in at the normal interval, re-reads config every 5
+minutes while the refusal lasts, and logs the error again only if a
+new refusal starts. A local build cannot self-update, so its error says
+to rebuild from a current checkout.
+
 **What it looks like in the log.** An update is not a mystery exit. You
 see the collector name it, then hand off to your supervisor:
 
