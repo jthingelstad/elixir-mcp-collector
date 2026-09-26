@@ -172,19 +172,28 @@ v2.0.x.
    that fails silently: `docs/RELEASING-COLLECTOR.md` in the elixir-mcp
    repo.
 
-9. Work lands on `main`; CI (`gofmt`, `go vet`, `go test`, and the
-   `run-forever.sh` and `install.sh` shell tests under `sh` and `dash`,
-   the workflow hygiene check, `go test` on macOS and Windows, the
-   `install.ps1` ACL, wrapper and verify tests, and the hardened unit
-   under real systemd on x86_64 and arm64, all in
-   `.github/workflows/validate.yml`) is the pre-push gate. Every
-   Action is pinned to a full commit SHA with its tag in a comment,
-   every workflow has `permissions: {}` and each job asks for its own,
-   and no checkout persists the token (`scripts/test-workflows.sh`
-   enforces all three). `main`
-   must stay releasable — `release.yml` builds the seven platform
-   artifacts from green main. Operator-facing behavior changes update
-   `README.md` in the same commit.
+9. **Every change lands through a pull request**, Jamie's and every
+   agent's alike (Jamie, 2026-09-26). A ruleset on `main` enforces it
+   with no bypass: no direct push, no force push, no deletion. A PR
+   merges only when `.github/workflows/validate.yml`'s seven jobs pass,
+   as required checks: `gofmt`, `go vet`, `go test`; the
+   `run-forever.sh` and `install.sh` shell tests under `sh` and `dash`
+   and the workflow hygiene check; `go test` on macOS and Windows; the
+   `install.ps1` ACL, wrapper and verify tests; and the hardened unit
+   under real systemd on x86_64 and arm64. No approval is required
+   (agents push as Jamie, and nobody can approve their own PR), so an
+   agent opens its PR and merges it itself with
+   `gh pr merge --auto --merge`, which waits for the checks. Every merge
+   builds a signed candidate (`release.yml`), so `main` must stay
+   releasable; nothing reaches the fleet until the hub names a release,
+   and naming stays Jamie's. Every Action is pinned to a full commit SHA
+   with its tag in a comment, every workflow has `permissions: {}` and
+   each job asks for its own, no checkout persists the token, and only
+   jobs in the `release` environment read the signing key
+   (`scripts/test-workflows.sh` enforces all four). Dependabot
+   (`.github/dependabot.yml`) opens weekly PRs for the pinned Actions
+   through the same checks. Operator-facing behavior changes update
+   `README.md` in the same PR.
 
 ## Layout
 
