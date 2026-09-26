@@ -89,8 +89,11 @@ $SUDO chmod 644 "$DIR/.env"   # loose on purpose: the collector must tighten it
 sed -e "s|^User=CHANGE_ME|User=$SVC_USER|" \
     -e "s|/CHANGE_ME/elixir-mcp-collector|$HOME_DIR/%i|g" \
     "$SELF_DIR/elixir-collector.service" | $SUDO tee "/etc/systemd/system/$UNIT" >/dev/null
-if grep -q CHANGE_ME "/etc/systemd/system/$UNIT"; then
-  no "every placeholder in the unit is substituted" "$(grep -n CHANGE_ME "/etc/systemd/system/$UNIT")"
+# Directives only: the header comment names the placeholder on purpose.
+if grep -v '^[[:space:]]*#' "/etc/systemd/system/$UNIT" | grep -q CHANGE_ME; then
+  no "every placeholder in the unit is substituted" "$(grep -n CHANGE_ME "/etc/systemd/system/$UNIT" | grep -v ':[[:space:]]*#')"
+else
+  ok "every placeholder in the unit is substituted"
 fi
 $SUDO systemctl daemon-reload
 if out="$($SUDO systemd-analyze verify "/etc/systemd/system/$UNIT_INST" 2>&1)" && ! printf '%s' "$out" | grep -qi "unknown\|error"; then
