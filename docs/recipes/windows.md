@@ -12,7 +12,14 @@ mkdir $HOME\elixir-collector; cd $HOME\elixir-collector
 CR_API_TOKEN=your-cr-key
 ELIXIR_API_TOKEN=emcg_your-token
 "@ | Set-Content -NoNewline .env
-irm https://raw.githubusercontent.com/jthingelstad/elixir-mcp-collector/main/scripts/install.ps1 | iex
+```
+
+Then run the README's Windows block ("3. Run it" → Windows). It
+downloads `install.ps1` with the release's signed `SHA256SUMS`, checks
+both with `ssh-keygen` and `Get-FileHash`, and only then runs the
+installer. Finish with:
+
+```powershell
 .\collector.exe doctor
 ```
 

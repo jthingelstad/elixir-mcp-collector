@@ -28,7 +28,10 @@ reach anything beyond three HTTPS endpoints.
    Wants the bearer, or to feed the collector hostile responses.
 3. **A hostile or broken upstream**: a CR API response or door answer
    built to exhaust memory.
-4. **A compromised release page.** Wants to push code to the fleet.
+4. **A compromised release page, GitHub account or workflow.** Wants
+   to push code to the fleet.
+5. **A compromised hub** (its database or release rows). Wants the
+   same, through the update authority.
 
 A local root or administrator is out of scope. They own the machine,
 and no user-space program can protect its secrets from them.
@@ -41,7 +44,7 @@ and no user-space program can protect its secrets from them.
 | 1 | Self-update writes a new file under a random name, created exclusively (`O_EXCL`) in the binary's directory, then fsyncs it and checks it is still the file it wrote. It runs it once with `version` (no tokens, no `.env`) and requires the named version, then renames it over the binary in one step and fsyncs the directory. Nothing follows a link planted in that directory, and a failure leaves the old binary in place. The replaced binary is kept until the new one gets an answer from the hub; a new one that keeps crashing before that is rolled back and its version refused on this host. | `installBinary`, `fallback.go` in `internal/v2` |
 | 2 | The bearer is sent over HTTPS only. A plain `http://` `ELIXIR_API_BASE` is switched to `https://`, except on loopback. A redirect from https down to http is refused, and Go already drops `Authorization` when a redirect goes to another host. | `v2.SecureBase`, `crapi.RefuseDowngrade` |
 | 3 | Every response read is capped at its limit plus one byte, after gzip decoding: 8 MiB from the CR API (reported to the hub as an overflow), 1 MiB from the door (a clear error), 200 MiB for an update. A declared `Content-Length` over the limit is refused before any read. | `crapi.Fetch`, `callWithHTTP`, `applyUpdate` |
-| 4 | The client installs only the exact version and SHA-256 named by the hub's `/config`, never "latest". | README, "Staying current" |
+| 4, 5 | The client installs only the exact version and SHA-256 named by the hub's `/config`, never "latest", and only when, before anything runs the download: the URL is this repository's release asset for that version and platform, with redirects limited to GitHub's asset hosts over HTTPS; the release's `SHA256SUMS` is signed (ed25519, SSHSIG) by the key compiled into the client and lists that SHA-256 and that version; and the version is not below the install floor. So neither the hub nor GitHub alone can hand a collector code. A compromised hub can choose only among signed releases at or above the floor, and a compromised release page cannot sign. | `trust.go` in `internal/v2`, SECURITY.md |
 | all | Logs never carry either secret, the environment, or a response body. Doctor shows only the last four characters of each secret. | tests in `internal/v2`, `internal/doctor` |
 
 ## What the host has to provide, by platform
@@ -54,7 +57,7 @@ and no user-space program can protect its secrets from them.
 | Restart on crash, on the watchdog and after an update; stop on exit 2 | `Restart=always`, `RestartPreventExitStatus=2` | `KeepAlive`, **but launchd does not stop on exit 2** | task restart settings; **exit 2 is retried** | the loop stops on exit 2 |
 | Update swap never leaves the start path empty | yes (link aside, one rename) | yes | two renames; `run-collector.cmd` restores `collector.exe.prev` if power is lost between them (installs from before 2026-09-26 need `install.ps1` re-run) | yes |
 | A crash-looping update is restarted into the rollback | yes: a trial panic dies by SIGABRT, which `RestartPreventExitStatus=2` does not match | `KeepAlive` restarts any exit | task restart settings (exit 2 is retried) | yes: SIGABRT is not exit 2 |
-| Tested in CI | the unit under real systemd on ubuntu-latest (x86_64) and ubuntu-24.04-arm (arm64): start, `.env` repair, self-update through the sandbox, rollback of a release that crashes at startup, exit 2 | `go test` on macos-latest, including the fallback's real-process rollback | `go test` (including the rollback of a running .exe) and the ACL and wrapper blocks of `install.ps1` on windows-latest | `run-forever.sh` under `sh` and `dash` |
+| Tested in CI | the unit under real systemd on ubuntu-latest (x86_64) and ubuntu-24.04-arm (arm64): start, `.env` repair, self-update through the sandbox, refusal of a release signed by another key, rollback of a release that crashes at startup, exit 2 | `go test` on macos-latest, including the fallback's real-process rollback | `go test` (including the rollback of a running .exe) and the ACL, wrapper and download-and-verify blocks of `install.ps1` on windows-latest | `run-forever.sh` under `sh` and `dash` |
 
 Gaps a later change could close:
 
@@ -67,5 +70,12 @@ Gaps a later change could close:
   before a response (broken TLS setup, say) from a hub outage, so it
   does not roll that back. It also runs inside the release it guards,
   so a release that breaks the guard itself is not covered.
+- A compromised hub can still name an older signed release at or above
+  the install floor (a replay). The floor only moves up in a signed
+  release, so narrowing that is a release away, not instant. A leaked
+  signing key plus a compromised hub is fleet-wide code execution until
+  the key is rotated out (SECURITY.md).
+- The first release that verifies signatures was installed by a client
+  that did not, on the strength of the hub's hash alone.
 - launchd and Task Scheduler restart after exit 2 (a missing token).
   That costs a restart every 10 seconds or every minute, not a failure.

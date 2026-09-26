@@ -7,12 +7,22 @@ on:
 
 # No AWS credentials in CI, ever. Green main IS the release gate
 # (release.yml builds the binaries). Collectors are pure API clients.
+#
+# Least privilege (issue #5): the token can read the repository and
+# nothing else, and no job leaves it in .git/config. Actions are pinned
+# to full commit SHAs, the tag each was in the comment beside it (see
+# release.yml for how to move one).
+permissions: {}
 jobs:
   go:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.24"
       - run: gofmt -l . | tee /dev/stderr | (! read)
@@ -23,8 +33,12 @@ jobs:
       - run: go test ./...
   shell:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # dash is Debian's POSIX sh and the closest stand-in for BusyBox
       # ash on Synology DSM: run the supervisor tests under both.
       - run: sudo apt-get install -y --no-install-recommends dash
@@ -32,6 +46,7 @@ jobs:
       - run: SH=dash dash scripts/test-run-forever.sh
       - run: sh scripts/test-install.sh
       - run: SH=dash sh scripts/test-install.sh
+      - run: sh scripts/test-workflows.sh
   # The updater's Windows rename path and the macOS symlink handling
   # only run on those hosts (issue #6), so the Go tests run there too.
   # So does the fallback's end-to-end test (internal/v2/fallback_test.go):
@@ -43,25 +58,36 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.24"
       - run: go vet ./...
       - run: go test ./...
   # install.ps1's user-only .env ACL, on a real Windows host, under both
-  # Windows PowerShell 5.1 (what `irm | iex` usually runs in) and pwsh.
-  # Also the run-collector.cmd wrapper, which restores collector.exe from
-  # collector.exe.prev after a power cut mid-swap.
+  # Windows PowerShell 5.1 and pwsh. Also the run-collector.cmd wrapper,
+  # which restores collector.exe from collector.exe.prev after a power
+  # cut mid-swap, and the download-and-verify block as a release
+  # publishes it, pinned to its own tag and checksums (issue #5).
   windows-acl:
     runs-on: windows-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-install-acl.ps1
       - run: pwsh -NoProfile -File scripts/test-install-acl.ps1
       - run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-install-wrapper.ps1
       - run: pwsh -NoProfile -File scripts/test-install-wrapper.ps1
+      - run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-install-verify.ps1
+      - run: pwsh -NoProfile -File scripts/test-install-verify.ps1
   # The hardened systemd unit under real systemd: it must start the
   # collector, let it tighten .env and self-update in place, roll back a
   # release that crashes at startup, and stop on exit 2. Loopback only;
@@ -72,9 +98,13 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.24"
       - run: sh scripts/test-systemd-unit.sh

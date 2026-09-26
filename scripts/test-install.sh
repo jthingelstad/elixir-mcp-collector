@@ -53,6 +53,7 @@ while [ \$# -gt 0 ]; do
     *) url="\$1"; shift ;;
   esac
 done
+echo "\$url" >> "$case/urls"
 case "\$url" in
   *api.github.com*releases/latest*) printf '{"tag_name": "v9.9.9"}'; exit 0 ;;
   *SHA256SUMS*)
@@ -67,7 +68,7 @@ C
 }
 
 run() {
-  ( cd "$TMP/$1/run" && PATH="$TMP/$1/bin:$PATH" "$SH" "$TARGET" 2>&1 )
+  ( cd "$TMP/$1/run" && PATH="$TMP/$1/bin:$PATH" "$SH" "${2:-$TARGET}" 2>&1 )
 }
 
 # --- 1. the happy path installs and says what it verified ---
@@ -175,6 +176,58 @@ if contains "Tightened" "$out"; then
   no "a private .env is left alone" "$out"
 else
   ok "a private .env is left alone"
+fi
+
+# --- 9. the installer a release publishes is pinned (issue #5) ---
+# scripts/pin-installers.sh bakes the tag and the binaries' checksums in,
+# so the verified installer trusts nothing it downloads afterwards: it
+# never asks which release is Latest and never fetches SHA256SUMS.
+pin_with() { # pin_with <case> <sums body>
+  printf '%s\n' "$2" > "$TMP/$1/binsums"
+  sh "$SELF_DIR/pin-installers.sh" v1.2.3 "$TMP/$1/binsums" "$TMP/$1/pinned" >/dev/null
+}
+setup pinned "this SHA256SUMS must never be read"
+pin_with pinned "$GOOD_SHA  collector_linux_amd64
+$(printf '%064d' 0)  collector_darwin_arm64"
+out="$(run pinned "$TMP/pinned/pinned/install.sh")"; code=$?
+if [ "$code" -eq 0 ] && contains "SHA256 verified against v1.2.3" "$out" && [ -x "$TMP/pinned/run/collector" ]; then
+  ok "a pinned installer installs its own release's binary"
+else
+  no "a pinned installer installs its own release's binary" "exit $code: $out"
+fi
+urls="$(cat "$TMP/pinned/urls" 2>/dev/null)"
+if [ "$urls" = "https://github.com/jthingelstad/elixir-mcp-collector/releases/download/v1.2.3/collector_linux_amd64" ]; then
+  ok "a pinned installer downloads only the binary, from its own tag"
+else
+  no "a pinned installer downloads only the binary, from its own tag" "$urls"
+fi
+
+setup pinnedbad "$GOOD_SHA  collector_linux_amd64"
+pin_with pinnedbad "$(printf '%064d' 0)  collector_linux_amd64"
+out="$(run pinnedbad "$TMP/pinnedbad/pinned/install.sh")"; code=$?
+if [ "$code" -ne 0 ] && contains "SHA256 mismatch" "$out" && [ ! -e "$TMP/pinnedbad/run/collector" ]; then
+  ok "a pinned installer refuses a binary its baked checksum does not match"
+else
+  no "a pinned installer refuses a binary its baked checksum does not match" "exit $code: $out"
+fi
+
+setup pinmalformed ""
+printf 'deadbeef  collector_linux_amd64\n' > "$TMP/pinmalformed/binsums"
+if sh "$SELF_DIR/pin-installers.sh" v1.2.3 "$TMP/pinmalformed/binsums" "$TMP/pinmalformed/pinned" >/dev/null 2>&1; then
+  no "pin-installers.sh refuses a malformed checksum line"
+else
+  ok "pin-installers.sh refuses a malformed checksum line"
+fi
+printf '%s  collector_linux_amd64\n' "$GOOD_SHA" > "$TMP/pinmalformed/binsums"
+if sh "$SELF_DIR/pin-installers.sh" 'v1.2.3"; rm -rf /' "$TMP/pinmalformed/binsums" "$TMP/pinmalformed/pinned" >/dev/null 2>&1; then
+  no "pin-installers.sh refuses a tag that is not a version"
+else
+  ok "pin-installers.sh refuses a tag that is not a version"
+fi
+if grep -qx "\$PinnedTag = 'v1.2.3'" "$TMP/pinned/pinned/install.ps1" && grep -qF "$GOOD_SHA  collector_linux_amd64" "$TMP/pinned/pinned/install.ps1"; then
+  ok "install.ps1 is pinned the same way"
+else
+  no "install.ps1 is pinned the same way" "$(grep -n Pinned "$TMP/pinned/pinned/install.ps1")"
 fi
 
 echo

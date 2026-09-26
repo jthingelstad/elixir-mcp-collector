@@ -87,6 +87,8 @@ type Client struct {
 	OnResponse func()
 	// Bin is the binary self-update replaces; "" is os.Executable().
 	Bin string
+	// releaseKeys overrides the compiled-in release key (tests only).
+	releaseKeys string
 
 	cfg              Config
 	brk              *breaker.Breaker
@@ -242,7 +244,8 @@ func (c *Client) submitWithRetry(submit map[string]any) (int, error) {
 
 // LoadConfig fetches the launch-time contract and applies the update
 // authority: if the server names a different version for our platform,
-// download it, verify the server-named sha256, swap atomically, exit.
+// download it, verify the server-named sha256 and the release signature
+// (trust.go), swap atomically, exit.
 func (c *Client) LoadConfig(selfUpdate bool) error {
 	status, err := c.call("GET", "/config", nil, &c.cfg)
 	if err != nil {
@@ -312,6 +315,13 @@ func (c *Client) updateTo(version, url, sha string) {
 	c.Log("info", "update authority names "+version+"; self-updating")
 	if err := c.applyUpdate(url, sha, version); err != nil {
 		// An update failure never stops collection.
+		var u untrusted
+		if errors.As(err, &u) {
+			// Not a flaky download: the release did not prove who
+			// published it. Loud, and retried every hour like any other.
+			c.Log("error", fmt.Sprintf("self-update REFUSED %s: %v", version, err))
+			return
+		}
 		c.Log("warn", "self-update failed: "+err.Error())
 		return
 	}
@@ -319,24 +329,52 @@ func (c *Client) updateTo(version, url, sha string) {
 	os.Exit(0)
 }
 
-func (c *Client) applyUpdate(url, wantSha, version string) error {
-	res, err := c.HTTP.Get(url)
+// applyUpdate installs the release the hub named. Everything that proves
+// the download (trust.go) happens before installBinary, whose self-check
+// is the first thing to execute it: the URL is this repository's asset
+// for this version, the release's SHA256SUMS is signed by the compiled-in
+// key and covers the named hash, and the download has that hash.
+func (c *Client) applyUpdate(rawURL, wantSha, version string) error {
+	keys, err := c.trustedKeys()
+	if err != nil {
+		return untrusted{err}
+	}
+	named, ok := parseVersion(version)
+	if !ok {
+		return untrusted{fmt.Errorf("the hub named %q, which is not a release version", version)}
+	}
+	if floor, _ := parseVersion(installFloor); compareVersions(named, floor) < 0 {
+		return untrusted{fmt.Errorf("the hub named %s, below %s, the oldest release this collector installs", version, installFloor)}
+	}
+	if cur, ok := parseVersion(c.Version); ok && compareVersions(named, cur) < 0 {
+		c.Log("warn", fmt.Sprintf("the hub names %s, older than this %s: rolling back", version, c.Version))
+	}
+	if !sha256Re.MatchString(wantSha) {
+		return untrusted{fmt.Errorf("the hub named %q, which is not a sha256", wantSha)}
+	}
+	asset := releaseAsset(runtime.GOOS, runtime.GOARCH)
+	dir, err := c.checkUpdateURL(rawURL, version, asset)
+	if err != nil {
+		return untrusted{err}
+	}
+	client := *c.HTTP
+	client.CheckRedirect = c.updateRedirect
+	sums, err := download(&client, dir+"SHA256SUMS", maxSumsBytes)
+	if err != nil {
+		return fmt.Errorf("SHA256SUMS: %w", err)
+	}
+	sig, err := download(&client, dir+"SHA256SUMS.sig", maxSigBytes)
+	if err != nil {
+		return fmt.Errorf("SHA256SUMS.sig (a release from before signing?): %w", err)
+	}
+	key, err := verifyRelease(sums, sig, keys, version, asset, wantSha)
+	if err != nil {
+		return untrusted{err}
+	}
+	c.Log("info", fmt.Sprintf("%s is signed by release key %s and its signed SHA256SUMS covers the hash the hub named", version, key.Fingerprint))
+	data, err := download(&client, rawURL, maxUpdateBytes)
 	if err != nil {
 		return err
-	}
-	defer res.Body.Close()
-	if res.StatusCode != 200 {
-		return fmt.Errorf("download HTTP %d", res.StatusCode)
-	}
-	if res.ContentLength > maxUpdateBytes {
-		return fmt.Errorf("download over %d bytes", maxUpdateBytes)
-	}
-	data, err := io.ReadAll(io.LimitReader(res.Body, maxUpdateBytes+1))
-	if err != nil {
-		return err
-	}
-	if len(data) > maxUpdateBytes {
-		return fmt.Errorf("download over %d bytes", maxUpdateBytes)
 	}
 	sum := sha256.Sum256(data)
 	if hex.EncodeToString(sum[:]) != wantSha {
@@ -363,6 +401,30 @@ func (c *Client) applyUpdate(url, wantSha, version string) error {
 		_ = os.Remove(trial)
 	}
 	return err
+}
+
+// download reads url whole, refusing anything but a 200 and anything
+// over max bytes (issue #6: the read stops at max+1).
+func download(client *http.Client, url string, max int64) ([]byte, error) {
+	res, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		return nil, fmt.Errorf("download HTTP %d", res.StatusCode)
+	}
+	if res.ContentLength > max {
+		return nil, fmt.Errorf("download over %d bytes", max)
+	}
+	data, err := io.ReadAll(io.LimitReader(res.Body, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > max {
+		return nil, fmt.Errorf("download over %d bytes", max)
+	}
+	return data, nil
 }
 
 // binary is the path of the running binary's real file (Bin in tests).

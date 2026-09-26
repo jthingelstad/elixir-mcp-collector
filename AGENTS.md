@@ -55,10 +55,30 @@ candidates soak as a dev build (rule 8).
    multiplication (ToS posture). Pacing (~1.5 s floor) and the 5×403
    circuit breaker are load-bearing and server-configured; never remove
    them. 429s honor `Retry-After`.
-4. **Self-update obeys the UPDATE AUTHORITY.** A release build installs
-   only the exact version + SHA-256 the server's config endpoint names
-   (key `go-<GOOS>-<GOARCH>`); a compromised release page alone cannot
-   push code to operators. The check rides the `/config` call at startup
+4. **Self-update obeys the UPDATE AUTHORITY, and a release must prove
+   who published it.** A release build installs only the exact version
+   + SHA-256 the server's config endpoint names (key
+   `go-<GOOS>-<GOARCH>`), and only when (`internal/v2/trust.go`, issue
+   #5, all checked before anything executes the download): the URL is
+   this repo's release asset for exactly that version and platform,
+   with redirects only to GitHub's asset hosts; the release's
+   `SHA256SUMS` carries an SSHSIG ed25519 signature by the key compiled
+   into `releasekey.go` and lists that hash AND a `VERSION` line for
+   that version (the anti-replay binding); and the version is at or
+   above `installFloor`. The signature adds to the hub, never replaces
+   it: neither the hub nor GitHub alone can push code. Verification is
+   stdlib only (`crypto/ed25519`); do not add Sigstore/cosign or any
+   dependency for it. The private key lives only in the
+   `COLLECTOR_SIGNING_KEY` Actions secret; never generate, print or
+   handle it here. `release.yml` refuses to build while the compiled
+   key is the placeholder or the secret is missing, and verifies what
+   it is about to publish with the collector's own verifier. A
+   verification failure is an ordinary failed update (`self-update
+   REFUSED`, retried hourly), never a `.refused` file. Naming an older
+   signed release still rolls the fleet back; a release from before
+   signing must first be signed by the `sign-release` workflow
+   (SECURITY.md). `installFloor` is the monotonicity rule: it only
+   moves up. The check rides the `/config` call at startup
    and hourly after, so naming a version reaches the fleet within the
    hour. There is NO pin and no opt-out, deliberately: the fleet shares
    one rate budget and one contract, so a stale client is everyone's
@@ -78,7 +98,8 @@ candidates soak as a dev build (rule 8).
    `infra/scripts/name-collector-release.mjs`; procedure in
    `docs/RELEASING-COLLECTOR.md`). Cross-platform: release.yml
    builds macOS (arm64/amd64), Windows (amd64/arm64), and Linux
-   (amd64/arm64/armv7). **The way back from a bad release lives in the
+   (amd64/arm64/armv7), plus the pinned installers, `VERSION`,
+   `SHA256SUMS` and `SHA256SUMS.sig`. **The way back from a bad release lives in the
    updater** (`internal/v2/fallback.go`, 2026-09-26). Before the swap,
    the staged candidate is run with `collector version` (first thing
    in `main`: no `.env`, no tokens, no network) and must report the
@@ -140,10 +161,14 @@ candidates soak as a dev build (rule 8).
 
 9. Work lands on `main`; CI (`gofmt`, `go vet`, `go test`, and the
    `run-forever.sh` and `install.sh` shell tests under `sh` and `dash`,
-   `go test` on macOS and Windows, the `install.ps1` ACL and wrapper
-   tests, and the hardened unit under real systemd on x86_64 and
-   arm64, all in
-   `.github/workflows/validate.yml`) is the pre-push gate. `main`
+   the workflow hygiene check, `go test` on macOS and Windows, the
+   `install.ps1` ACL, wrapper and verify tests, and the hardened unit
+   under real systemd on x86_64 and arm64, all in
+   `.github/workflows/validate.yml`) is the pre-push gate. Every
+   Action is pinned to a full commit SHA with its tag in a comment,
+   every workflow has `permissions: {}` and each job asks for its own,
+   and no checkout persists the token (`scripts/test-workflows.sh`
+   enforces all three). `main`
    must stay releasable — `release.yml` builds the seven platform
    artifacts from green main. Operator-facing behavior changes update
    `README.md` in the same commit.
@@ -154,7 +179,13 @@ candidates soak as a dev build (rule 8).
   `ELIXIR_API_TOKEN`; missing either is exit 2. The module has ZERO
   third-party dependencies (stdlib only) since the SQS path went.
 - `internal/v2/` — the zero-trust client (config/lease/submit, watchdog,
-  activity log, update authority). Issue #6 hardening lives here too:
+  activity log, update authority). `trust.go` is the release trust
+  chain (URL and redirect allowlist, SSHSIG verification, the VERSION
+  binding, the install floor) and `releasekey.go` the compiled-in
+  public key; `trust_test.go` covers bad signature, wrong host,
+  redirect escape, downgrade, replay, interrupted write and rollback,
+  interop with real `ssh-keygen`, and (`RELEASE_DIR`,
+  `REQUIRE_RELEASE_KEY`) the checks `release.yml` runs. Issue #6 hardening lives here too:
   `SecureBase` (http -> https except loopback; repair, never refuse),
   bounded door/update reads, and `installBinary` (exclusive random temp
   file beside the binary, fsync, same-file check, atomic rename), with
@@ -195,7 +226,11 @@ candidates soak as a dev build (rule 8).
   `internal/update` (GitHub-polling updater) were DELETED 2026-09-06
   with the transport they served; do not reintroduce either.
 - `scripts/install.sh` — one-command install for macOS/Linux (download
-  binary + supervise via launchd/systemd). `scripts/install.ps1` — the
+  binary + supervise via launchd/systemd). The copies a release
+  publishes are pinned by `scripts/pin-installers.sh` to that release's
+  tag and binary checksums, and the README has operators verify them
+  against the signed `SHA256SUMS` before running; the repository copies
+  resolve Latest. `scripts/install.ps1` — the
   Windows equivalent (download .exe + register a Scheduled Task).
   `scripts/elixir-collector.service` (systemd unit, sandboxed; its
   `ReadWritePaths` must be the collector dir or self-update fails, and
@@ -223,6 +258,10 @@ candidates soak as a dev build (rule 8).
   DigitalOcean page - its Reserved IP is an alias with ambiguous
   egress. When the installer or the unit changes, the YAML changes in
   the same commit.
+- `SECURITY.md` — private reporting, the release key, verifying a
+  release by hand, key generation/rotation/compromise, and the rollback
+  drill. `.github/workflows/sign-release.yml` backfills a signature onto
+  a pre-signing release so the hub can name it as a rollback.
 - `docs/THREAT-MODEL.md` — what the collector guarantees on the host
   itself vs what each platform's supervisor provides. Keep its tables
   true when the unit, the installers or the client change.

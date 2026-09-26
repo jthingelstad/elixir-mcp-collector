@@ -1,9 +1,15 @@
 # One-command install for the Elixir MCP collector on Windows (PowerShell).
-# Downloads the latest release .exe for this machine, verifies its
-# SHA-256, and registers a Scheduled Task (built into Windows - no extra
-# tooling) that starts it at logon and restarts it if it stops.
+# Downloads the release .exe for this machine, verifies its SHA-256, and
+# registers a Scheduled Task (built into Windows - no extra tooling) that
+# starts it at logon and restarts it if it stops.
 #
-#   powershell -ExecutionPolicy Bypass -File scripts\install.ps1
+# The copy published with each release is PINNED (scripts/pin-installers.sh):
+# it installs that release's .exe, checked against the checksums baked in
+# below, so once you have verified this file against the release's signed
+# SHA256SUMS (README, "3. Run it") nothing it downloads needs trusting.
+# The copy in the repository resolves the Latest release instead.
+#
+#   powershell -ExecutionPolicy Bypass -File install.ps1
 #
 # Requires a .env in the current directory (see .env.example) with
 # CR_API_TOKEN and ELIXIR_API_TOKEN. No Node, no AWS, no git needed.
@@ -52,11 +58,21 @@ switch ($arch) {
 }
 $exe = "$dir\collector.exe"
 
+# BEGIN verify
+# Filled in by release.yml in the copy each release publishes; empty here.
+# (scripts/test-install-verify.ps1 runs the block between the markers,
+# as published and pinned.)
+$PinnedTag = ''
+$PinnedSums = ''
 # Resolve the release ONCE so the binary and its checksums cannot come
 # from two different builds if Latest moves between the requests.
 # ($ErrorActionPreference is already Stop at the top of this script, so
 # a failed request throws rather than warning and carrying on.)
-$tag = (Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest").tag_name
+if ($PinnedTag) {
+  $tag = $PinnedTag
+} else {
+  $tag = (Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest").tag_name
+}
 if (-not $tag) { throw "Could not resolve the latest release of $repo." }
 $base = "https://github.com/$repo/releases/download/$tag"
 
@@ -67,10 +83,15 @@ $tmp  = "$dir\.collector.$PID.exe"
 $sums = "$dir\.sums.$PID"
 try {
   Invoke-WebRequest -Uri "$base/$asset" -OutFile $tmp
-  try {
-    Invoke-WebRequest -Uri "$base/SHA256SUMS" -OutFile $sums
-  } catch {
-    throw "Could not download SHA256SUMS for $tag - refusing to install unverified."
+  if ($PinnedSums) {
+    # The checksums came with this installer, from the same signed release.
+    Set-Content -LiteralPath $sums -Value $PinnedSums -Encoding ascii
+  } else {
+    try {
+      Invoke-WebRequest -Uri "$base/SHA256SUMS" -OutFile $sums
+    } catch {
+      throw "Could not download SHA256SUMS for $tag - refusing to install unverified."
+    }
   }
 
   $sumLines = @(Select-String -Path $sums -Pattern "\s\*?$([regex]::Escape($asset))$")
@@ -92,6 +113,7 @@ try {
 } finally {
   Remove-Item $tmp, $sums -ErrorAction SilentlyContinue
 }
+# END verify
 
 $taskName = "ElixirMCPCollector"
 $env:ELIXIR_MCP_ENV_FILE = "$dir\.env"

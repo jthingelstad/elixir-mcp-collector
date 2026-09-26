@@ -1,0 +1,90 @@
+# Sign a release published before signing existed (issue #5), so the hub
+# can name it again as a rollback. A verifying collector installs only a
+# release whose SHA256SUMS is signed and carries a VERSION line; this
+# adds both to a release that has neither, and nothing else.
+#
+# It is the deliberate, signed step of rolling back to a pre-signing
+# release: run it, then name the tag. SECURITY.md has the procedure. It
+# refuses a release that is already signed (a signed release is never
+# re-signed with different content), one whose SHA256SUMS does not match
+# its own assets, and one that does not verify afterwards with the key
+# compiled into main.
+#
+# Actions are pinned to full commit SHAs (see release.yml).
+name: sign-release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release to sign, e.g. v2.0.30"
+        required: true
+permissions: {}
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # gh release upload; nothing else
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.24"
+      - name: refuse without the release key and the signing secret
+        env:
+          HAS_SIGNING_KEY: ${{ secrets.COLLECTOR_SIGNING_KEY != '' }}
+        run: |
+          REQUIRE_RELEASE_KEY=1 go test ./internal/v2 -run '^TestCompiledReleaseKey$' -count=1
+          [ "$HAS_SIGNING_KEY" = "true" ] || { echo "::error::The COLLECTOR_SIGNING_KEY secret is not set."; exit 1; }
+      - name: fetch the release and check it is what it says
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "::error::'$TAG' is not a release tag"; exit 1; }
+          assets="$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name')"
+          if printf '%s\n' "$assets" | grep -qx 'SHA256SUMS.sig'; then
+            echo "::error::$TAG is already signed; a signed release is never re-signed."
+            exit 1
+          fi
+          mkdir rel
+          gh release download "$TAG" --repo "${{ github.repository }}" --dir rel
+          cd rel
+          if grep -q ' VERSION$' SHA256SUMS; then
+            echo "::error::$TAG's SHA256SUMS already names a VERSION but has no signature; look before signing it."
+            exit 1
+          fi
+          # Every hash it lists must be the asset it names, as published.
+          sha256sum --strict -c SHA256SUMS
+          printf '%s\n' "$TAG" > VERSION
+          sha256sum VERSION >> SHA256SUMS
+      - name: sign SHA256SUMS
+        env:
+          COLLECTOR_SIGNING_KEY: ${{ secrets.COLLECTOR_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key="$RUNNER_TEMP/release-signing-key"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$COLLECTOR_SIGNING_KEY" > "$key"
+          ssh-keygen -Y sign -q -f "$key" -n elixir-mcp-collector-release rel/SHA256SUMS
+      - name: verify as a collector and an operator would
+        run: RELEASE_DIR="$PWD/rel" go test ./internal/v2 -run '^TestReleaseDirVerifies$' -count=1 -v
+      - name: upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # The signature goes last: until it is there, a verifying
+          # collector sees an unsigned release and simply tries again.
+          gh release upload "$TAG" --repo "${{ github.repository }}" rel/VERSION
+          gh release upload "$TAG" --repo "${{ github.repository }}" --clobber rel/SHA256SUMS
+          gh release upload "$TAG" --repo "${{ github.repository }}" rel/SHA256SUMS.sig
+          echo "Signed $TAG. The hub can name it now."
