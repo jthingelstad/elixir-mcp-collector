@@ -22,8 +22,14 @@ Notes:
   is a collector stopped until someone signs in. For a machine nobody
   sits at, change the task's trigger to "At startup" in Task Scheduler
   and set it to run whether the user is logged on or not.
-- Self-update renames the running `.exe` aside and cleans it up at the
-  next start; the `collector.exe.old` you may see is expected.
+- Self-update renames the running `.exe` aside as `collector.exe.prev`
+  and deletes it once the new version has reached Elixir MCP; a
+  version that cannot start is rolled back to it (README, "Staying
+  current"). `collector.exe.prev`, `collector.exe.trial`,
+  `collector.exe.refused` and `collector.exe.failed` are the updater's;
+  leave them be. An install from before 2026-09-26 should re-run the
+  installer once, for the `run-collector.cmd` line that covers a power
+  cut mid-update.
 - The installer restricts `.env` to your account and SYSTEM (inheritance
   off), and checks the result. If you change the task to run as a
   different account, give that account read access to `.env` too, or

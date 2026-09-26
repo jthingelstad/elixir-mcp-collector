@@ -333,17 +333,64 @@ the maintainer can see your version even when you cannot.
 **How it writes the new binary.** The download is checked against the
 SHA-256 first. It is then written to a new file with a random name in
 the collector's own directory, created fresh so it can never follow a
-link someone left there, flushed to disk, and renamed over the old
-binary in one step. If anything fails along the way, the temporary file
-is removed and the old binary keeps running.
+link someone left there, and flushed to disk. Before anything else
+changes, the collector **runs that file once** with `collector version`
+and requires it to report the version the server named. That run reads
+no `.env`, gets neither token and touches no network. A binary built
+for the wrong CPU, or one that crashes on start, fails here, and the
+old binary keeps running. Only then is the new file renamed over the
+old binary in one step. If anything fails along the way, the temporary
+file is removed and the old binary keeps running.
+
+**If a new version cannot start, it rolls itself back.** The binary it
+replaced is kept beside it as `collector.prev` until the new one gets
+its first answer from Elixir MCP. Any answer counts, even an error;
+then `collector.prev` is deleted, so a small disk never holds two
+binaries for long. Until that answer:
+
+- A start that dies without a clean exit (a crash, a kill, a power
+  cut) is counted. After three, the collector puts `collector.prev`
+  back and exits, and your supervisor starts the previous version.
+- **An outage is not a crash.** If Elixir MCP or your network is down
+  right after an update, the new version exits cleanly, restarts and
+  tries again, as many times as it takes. That never counts toward a
+  rollback.
+- **After a rollback the collector refuses exactly the version that
+  failed** on your machine, so it does not reinstall it and loop. It
+  says so in the log at every hourly check. The refusal ends by itself
+  the moment Elixir MCP names any other version. It is not a pin: you
+  cannot set it, and it can only hold back a version the server named
+  that then failed here. Deleting `collector.refused` retries that
+  version.
+
+```
+{"level":"info","msg":"update trial: running v2.0.52; v2.0.51 is kept until the hub answers"}
+{"level":"info","msg":"update to v2.0.52 proven (the hub answered); removed collector.prev"}
+```
+
+and, if it goes wrong:
+
+```
+{"level":"error","msg":"ROLLED BACK: v2.0.52 crashed 3 times before any answer from the hub; restored v2.0.51. ..."}
+{"level":"error","msg":"REFUSING update to v2.0.52: it crashed before reaching the hub on this machine and was rolled back. ..."}
+```
+
+Files you may briefly see beside the binary: `collector.prev` and
+`collector.trial` during an update's first minutes, and
+`collector.refused` after a rollback. Leave them be.
 
 **On Windows**, a running `.exe` cannot be overwritten, so the update
-renames the old binary to `collector.exe.old` beside itself and writes
-the new one in its place. That file is deleted at the next startup.
-Seeing one briefly is normal.
+renames the old binary to `collector.exe.prev` beside itself and moves
+the new one into its place. A rollback parks the failed one as
+`collector.exe.failed`, deleted at the next start. Those two renames
+are a moment apart. If the machine loses power between them,
+`run-collector.cmd` (written by `install.ps1`) puts `collector.exe.prev`
+back before it starts the collector. Installs from before this change
+should re-run `install.ps1` to get that line.
 
-**Can I pin or opt out? No.** There is no pin, no version flag, and no
-opt-out. A released binary runs the version the server names, and that
+**Can I pin or opt out? No.** There is no pin, no flag to choose a
+version, and no opt-out (`collector version` only prints the version
+you have). A released binary runs the version the server names, and that
 is deliberate: the fleet shares one global rate budget and one API
 contract, so a collector running last month's code is a liability to
 everyone else, not a private choice. If you cannot accept automatic

@@ -100,8 +100,15 @@ $trigger = New-ScheduledTaskTrigger -AtLogOn
 # Restart on failure, keep running indefinitely.
 $settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable
 # Pass the env-file location to the task's environment via a wrapper.
+# Self-update and rollback swap the running .exe with two renames
+# (Windows cannot replace a running .exe in one); if the machine loses
+# power between them, collector.exe is missing and collector.exe.prev
+# holds the previous build. The wrapper puts it back before starting.
+# (scripts/test-install-wrapper.ps1 runs the block between the markers.)
+# BEGIN wrapper
 $wrapper = "$dir\run-collector.cmd"
-"@echo off`r`nset ELIXIR_MCP_ENV_FILE=$dir\.env`r`n`"$exe`"" | Out-File -Encoding ascii $wrapper
+"@echo off`r`nset ELIXIR_MCP_ENV_FILE=$dir\.env`r`nif not exist `"$exe`" if exist `"$exe.prev`" move /y `"$exe.prev`" `"$exe`" >nul`r`n`"$exe`"" | Out-File -Encoding ascii $wrapper
+# END wrapper
 $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$wrapper`""
 
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue

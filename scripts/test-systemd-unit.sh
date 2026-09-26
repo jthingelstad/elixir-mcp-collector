@@ -2,13 +2,16 @@
 # End-to-end test of scripts/elixir-collector.service under real systemd
 # (issue #6): the hardened sandbox must start the collector, let it
 # tighten a loose .env, and let it SELF-UPDATE in place - the one write
-# the sandbox has to allow. It installs the unit the way a
+# the sandbox has to allow - and ROLL BACK a release that cannot start:
+# a candidate that passes the updater's self-check but crashes at
+# startup must end with the previous binary running and its version
+# refused. It installs the unit the way a
 # one-directory-per-instance operator does (elixir-collector@.service
 # with %i in the three paths), under /home so ProtectHome is exercised
 # too, then checks that exit 2 stops the unit instead of looping.
 #
 # Needs systemd as PID 1, root or sudo, go and python3. CI runs it on
-# ubuntu-latest. The "hub" is python's static file server on 127.0.0.1:
+# ubuntu-latest and ubuntu-24.04-arm. The "hub" is python's static file server on 127.0.0.1:
 # /config names a newer build of this same checkout; nothing leaves the
 # machine and no real token exists.
 #
@@ -64,7 +67,11 @@ sha() { sha256sum "$1" | awk '{print $1}'; }
 # --- the two builds and the fake hub ---
 (cd "$REPO" && CGO_ENABLED=0 go build -ldflags "-X main.version=v0.0.1-smoke" -o "$WEB/old" ./cmd/collector) || exit 1
 (cd "$REPO" && CGO_ENABLED=0 go build -ldflags "-X main.version=v0.0.2-smoke" -o "$WEB/new" ./cmd/collector) || exit 1
+# The bad release: passes `version`, then panics before any answer from
+# the hub (internal/v2/testdata/fakecollector, with the real v2.Guard).
+(cd "$REPO" && CGO_ENABLED=0 go build -ldflags "-X main.version=v0.0.3-smoke -X main.mode=crash" -o "$WEB/bad" ./internal/v2/testdata/fakecollector) || exit 1
 NEW_SHA="$(sha "$WEB/new")"
+BAD_SHA="$(sha "$WEB/bad")"
 mkdir -p "$WEB/api/collector"
 cat > "$WEB/api/collector/config" <<J
 {"pacing_ms":1500,"gateway":{"name":"smoke","channel":"bulk","status":"active"},
@@ -117,6 +124,13 @@ if journal | grep -qF "self-update failed"; then no "no self-update failure in t
 else ok "no self-update failure in the log"; fi
 left="$($SUDO find "$DIR" -name '.collector-update*' | head -1)"
 if [ -z "$left" ]; then ok "no update temp file is left behind"; else no "no update temp file is left behind" "$left"; fi
+if wait_for 30 "update to v0.0.2-smoke proven"; then ok "the new build's first answer from the hub proves it"
+else no "the new build's first answer from the hub proves it" "$(journal | tail -20)"; fi
+if $SUDO test -e "$DIR/collector.prev" || $SUDO test -e "$DIR/collector.trial"; then
+  no "proof removes the previous binary and the trial" "$($SUDO ls -la "$DIR")"
+else
+  ok "proof removes the previous binary and the trial"
+fi
 
 # --- 3. the loose .env was tightened, and said so ---
 mode="$($SUDO stat -c %a "$DIR/.env")"
@@ -134,7 +148,46 @@ else
   ok "neither token appears in the journal"
 fi
 
-# --- 6. exit 2 stops the unit rather than restart-looping ---
+# --- 6. a release that crashes at startup is rolled back ---
+cat > "$WEB/api/collector/config" <<J
+{"pacing_ms":1500,"gateway":{"name":"smoke","channel":"bulk","status":"active"},
+ "update":{"$KEY":{"version":"v0.0.3-smoke","sha256":"$BAD_SHA","url":"http://127.0.0.1:$PORT/bad"}}}
+J
+$SUDO systemctl restart "$UNIT_INST"   # the hourly config check, now
+if wait_for 30 "gateway up (fake) version=v0.0.3-smoke"; then ok "the bad release passes the self-check and is installed"
+else no "the bad release passes the self-check and is installed" "$(journal | tail -20)"; fi
+if wait_for 120 "REFUSING update to v0.0.3-smoke"; then ok "after the rollback, the restored build refuses the bad version"
+else no "after the rollback, the restored build refuses the bad version" "$(journal | tail -30)"; fi
+if journal | grep -qF "ROLLED BACK: v0.0.3-smoke crashed 3 times"; then ok "the rollback is logged loudly"
+else no "the rollback is logged loudly" "$(journal | tail -30)"; fi
+# A Go panic exits 2, which RestartPreventExitStatus=2 would take as a
+# configuration error and stop on; a trial panic must die by SIGABRT.
+if journal | grep -q "status=2/INVALIDARGUMENT"; then no "the crashing release was restarted, never stopped as exit 2" "$(journal | grep status=)"
+elif journal | grep -q "status=6/ABRT"; then ok "the crashing release was restarted, never stopped as exit 2"
+else no "the crashing release was restarted, never stopped as exit 2" "$(journal | grep -i "status=" | tail -5)"; fi
+if [ "$($SUDO sha256sum "$DIR/collector" | awk '{print $1}')" = "$NEW_SHA" ]; then ok "the previous build is back in place"
+else no "the previous build is back in place"; fi
+sleep 3
+state="$($SUDO systemctl show -p ActiveState --value "$UNIT_INST")"
+last_up="$(journal | grep -F "gateway up" | tail -1)"
+after_rollback="$(journal | sed -n '/ROLLED BACK/,$p' | grep -cF "version=v0.0.2-smoke")"
+if [ "$state" = "active" ] && [ "$after_rollback" -ge 1 ] && printf '%s' "$last_up" | grep -qF "version=v0.0.2-smoke"; then
+  ok "the previous build is running"
+else
+  no "the previous build is running" "state=$state last start: $last_up"
+fi
+if $SUDO grep -qF '"version":"v0.0.3-smoke"' "$DIR/collector.refused" 2>/dev/null; then ok "the refusal names exactly the bad version"
+else no "the refusal names exactly the bad version" "$($SUDO cat "$DIR/collector.refused" 2>&1)"; fi
+if $SUDO test -e "$DIR/collector.prev" || $SUDO test -e "$DIR/collector.trial"; then
+  no "no trial or previous binary is left after the rollback" "$($SUDO ls -la "$DIR")"
+else
+  ok "no trial or previous binary is left after the rollback"
+fi
+downloads="$(grep -c 'GET /bad ' "$WEB/http.log")"
+if [ "$downloads" = "1" ]; then ok "the refused version is not downloaded again"
+else no "the refused version is not downloaded again" "$downloads downloads"; fi
+
+# --- 7. exit 2 stops the unit rather than restart-looping ---
 $SUDO systemctl stop "$UNIT_INST"
 printf 'ELIXIR_API_BASE=http://127.0.0.1:%s/api/collector\n' "$PORT" | $SUDO tee "$DIR/.env" >/dev/null
 $SUDO systemctl start "$UNIT_INST"
