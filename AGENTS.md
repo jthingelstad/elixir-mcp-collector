@@ -280,29 +280,23 @@ v2.0.x.
 - `docs/GO-PORT.md` — design history (parts superseded by the zero-trust
   transition; see its postscript).
 
-## Local services on this host
+## Running collectors
 
-Jamie's machine runs two collectors, card identities Ram Rider and
-Tesla, both released Go binaries. **Neither runs out of this checkout**
-(2026-09-06): each is a released artifact under
-`~/elixir-collectors/<name>/` with its own `.env` beside it, so editing
-this repo cannot reach a live collector. Both SELF-UPDATE, so a door
-change no longer needs a hand bounce here.
+This repo says how to install and run a collector, never which ones are
+running. Running state belongs to the hub: Admin -> Collectors (or the
+`elixir_collectors` tool) is the only authority for which collectors
+exist, their status and their version. To learn which hub collector a
+local install is, run `collector doctor`: it reads `/config` and prints
+the collector's card and name. Do not record instances, hosts, service
+labels or paths here, the maintainer's included (Jamie, 2026-09-26): a
+list in a public install repo goes stale and misleads.
 
-- `com.poapkings.elixir-mcp-gw-go` -> `~/elixir-collectors/ram-rider/collector`.
-  Log: `~/Library/Logs/elixir-mcp-gw-go.log`.
-- `com.poapkings.elixir-mcp-gw2-py` -> `~/elixir-collectors/tesla/collector`.
-  Tesla ran the Python twin until 2026-09-26 and was converted to Go in
-  place; the launchd label and log path
-  (`~/Library/Logs/elixir-mcp-gw2-py.log`) kept their old names because
-  other host tooling references them. Don't rename them as tidying.
-
-Reload either with `launchctl unload/load` (a plist path or env change
-needs a full reload, not `kickstart`).
-
-Do NOT run a staged collector by hand to check its version: if a `.env`
-is already beside it you have just started a second live collector on
-that identity. Read the version from the log after launchd starts it.
+Live collectors run from released artifacts, never from a checkout, so
+editing this repo cannot reach one. Do NOT run a staged binary by hand
+beside a live `.env` to check its version: that starts a second live
+collector on the same identity. Use `collector version`, which reads no
+`.env` and touches no network, or `collector doctor`, which never
+leases.
 
 ---
 
