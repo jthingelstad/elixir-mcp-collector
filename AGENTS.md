@@ -105,7 +105,11 @@ v2.0.x.
    on a version it cannot parse (`dev`), deliberately; neither property
    is to be "fixed" (elixir-mcp `docs/DECISIONS.md`, "Releases are
    candidates until named"). The client does not enforce
-   `min_client_version`. The `update` block `/config` serves is the
+   `min_client_version`, but it does act on the refusal: a 426
+   `client_too_old` on lease or submit is its own state (`too_old`),
+   logged at error level once per refusal, and re-reads `/config` with
+   self-update at once and then every 5 minutes while it lasts, at the
+   normal check-in wait (`refusedAsTooOld` in `v2.go`). The `update` block `/config` serves is the
    hub's `collector_release` ledger, one row per platform, written when
    the maintainer names a release (elixir-mcp
    `infra/scripts/name-collector-release.mjs`; procedure in
@@ -204,7 +208,11 @@ v2.0.x.
   activity log, update authority). `trust.go` is the release trust
   chain (URL and redirect allowlist, SSHSIG verification, the VERSION
   binding, the install floor) and `releasekey.go` the compiled-in
-  public key; `trust_test.go` covers bad signature, wrong host,
+  public key; `report.go` is what every door call says about the build
+  (`x-collector-binary-sha256`, hashed once at startup, and
+  `x-collector-release-key`, the compiled key fingerprints) -
+  self-reported telemetry, never a gate (docs/THREAT-MODEL.md);
+  `trust_test.go` covers bad signature, wrong host,
   redirect escape, downgrade, replay, interrupted write and rollback,
   interop with real `ssh-keygen`, and (`RELEASE_DIR`,
   `REQUIRE_RELEASE_KEY`) the checks `release.yml` runs. Issue #6 hardening lives here too:

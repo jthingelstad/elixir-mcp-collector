@@ -235,3 +235,23 @@ func TestBaseNoteIsAWarningOnTheElixirCheck(t *testing.T) {
 		t.Fatalf("\n%s", Text(r))
 	}
 }
+
+// Doctor's /config call reports the build the way the collector's does,
+// so the hub does not see the binary change when an operator runs it.
+func TestConfigCallReportsTheBuild(t *testing.T) {
+	var got http.Header
+	d := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		_ = json.NewEncoder(w).Encode(healthyBody())
+	}))
+	defer d.Close()
+	o := opts(t, d.URL, ok200)
+	o.BinarySHA256 = strings.Repeat("ab", 32)
+	o.ReleaseKey = "SHA256:abc,SHA256:def"
+	Run(context.Background(), o)
+	if got.Get("x-collector-version") != "v2.0.27" ||
+		got.Get("x-collector-binary-sha256") != o.BinarySHA256 ||
+		got.Get("x-collector-release-key") != o.ReleaseKey {
+		t.Fatalf("headers: %v", got)
+	}
+}

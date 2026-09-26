@@ -47,6 +47,29 @@ and no user-space program can protect its secrets from them.
 | 4, 5 | The client installs only the exact version and SHA-256 named by the hub's `/config`, never "latest", and only when, before anything runs the download: the URL is this repository's release asset for that version and platform, with redirects limited to GitHub's asset hosts over HTTPS; the release's `SHA256SUMS` is signed (ed25519, SSHSIG) by the key compiled into the client and lists that SHA-256 and that version; and the version is not below the install floor. So neither the hub nor GitHub alone can hand a collector code. A compromised hub can choose only among signed releases at or above the floor, and a compromised release page cannot sign. | `trust.go` in `internal/v2`, SECURITY.md |
 | all | Logs never carry either secret, the environment, or a response body. Doctor shows only the last four characters of each secret. | tests in `internal/v2`, `internal/doctor` |
 
+## What the collector reports, and what that is worth
+
+Every door call carries, beside the bearer, three headers describing
+the build: `x-collector-version`, `x-collector-binary-sha256` (the
+SHA-256 of the running executable, hashed once at startup) and
+`x-collector-release-key` (the `SHA256:` fingerprint of each compiled
+release key, comma-separated during a rotation). None is secret; the
+test suite checks neither carries the token.
+
+This is **self-reported telemetry**. An operator controls the binary
+and the network and can send any value, so the hub page built on it
+is for honest operators: it shows which collectors run a signed
+release and which run a dev build, a fork or a stale binary. It is not
+an attestation and must not gate anything that matters against
+adversary 1 or a dishonest operator.
+
+Within that, the two headers carry different weight. The key
+fingerprint alone proves nothing: the key is in the source, so a dev
+build or a fork carries it too; it says only which key the collector
+trusts. The evidence is the binary hash matching the signed hash the
+hub holds for that version and platform from naming it. Code in
+`internal/v2/report.go`.
+
 ## What the host has to provide, by platform
 
 | | Linux + systemd (our unit, cloud-init) | macOS (launchd agent) | Windows (Scheduled Task) | NAS / no supervisor (`run-forever.sh`) |

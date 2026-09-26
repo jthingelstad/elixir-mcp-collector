@@ -71,6 +71,8 @@ type lease struct {
 	NextCheckInS *int   `json:"next_check_in_s"`
 	Error        string `json:"error"`
 	Hint         string `json:"hint"`
+	// On a 426 client_too_old: the version the door requires.
+	MinClientVersion string `json:"min_client_version"`
 }
 
 type Client struct {
@@ -87,15 +89,24 @@ type Client struct {
 	OnResponse func()
 	// Bin is the binary self-update replaces; "" is os.Executable().
 	Bin string
+	// BinarySHA256 is the running binary's hash (BinarySHA256()), sent
+	// on every door call; "" sends no header.
+	BinarySHA256 string
 	// releaseKeys overrides the compiled-in release key (tests only).
 	releaseKeys string
+	keyFP       string // releaseKeyHeader's cache
+	keyFPDone   bool
 
 	cfg              Config
 	brk              *breaker.Breaker
 	lastFetchStarted time.Time
 	lastProgress     time.Time // last successful door round-trip (watchdog)
-	jobsDone         int       // activity counters, flushed to the log
-	fetchErrors      int
+	lastConfig       time.Time // last /config read, successful or not
+	// tooOld is set while the door refuses this client with 426
+	// client_too_old, so the error is logged once, not on every retry.
+	tooOld      bool
+	jobsDone    int // activity counters, flushed to the log
+	fetchErrors int
 }
 
 // What a /config without pacing_ms or overflow_bytes falls back to: the
@@ -177,6 +188,12 @@ func (c *Client) callWithHTTP(client *http.Client, method, route string, body an
 	req.Header.Set("authorization", "Bearer "+c.Token)
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("x-collector-version", c.Version)
+	if c.BinarySHA256 != "" {
+		req.Header.Set(headerBinarySHA256, c.BinarySHA256)
+	}
+	if fp := c.releaseKeyHeader(); fp != "" {
+		req.Header.Set(headerReleaseKey, fp)
+	}
 	res, err := client.Do(req)
 	if err != nil {
 		return 0, err
@@ -193,6 +210,11 @@ func (c *Client) callWithHTTP(client *http.Client, method, route string, body an
 	if c.OnResponse != nil {
 		c.OnResponse()
 	}
+	if raw, ok := out.(*rawBody); ok {
+		// Kept as sent, never judged: the caller decodes it if it cares.
+		*raw = data
+		return res.StatusCode, nil
+	}
 	if len(data) > maxDoorBytes && out != nil {
 		return res.StatusCode, fmt.Errorf("%s %s: response over %d bytes", method, route, maxDoorBytes)
 	}
@@ -204,10 +226,13 @@ func (c *Client) callWithHTTP(client *http.Client, method, route string, body an
 	return res.StatusCode, nil
 }
 
+// rawBody, as callWithHTTP's out, takes the answer undecoded.
+type rawBody []byte
+
 // submitWithRetry keeps a fetched result attached to its original lease when
 // the door has a transient failure. The server supplies the budget; guards
 // keep a malformed or older config safely inside the 90-second lease TTL.
-func (c *Client) submitWithRetry(submit map[string]any) (int, error) {
+func (c *Client) submitWithRetry(submit map[string]any, out any) (int, error) {
 	attempts := c.cfg.SubmitRetry.MaxAttempts
 	if attempts < 1 || attempts > 3 {
 		attempts = 3
@@ -224,7 +249,7 @@ func (c *Client) submitWithRetry(submit map[string]any) (int, error) {
 	for attempt := 1; attempt <= attempts; attempt++ {
 		client := *c.HTTP
 		client.Timeout = timeout
-		status, err := c.callWithHTTP(&client, "POST", "/submit", submit, nil)
+		status, err := c.callWithHTTP(&client, "POST", "/submit", submit, out)
 		if err == nil && status < 500 {
 			return status, nil
 		}
@@ -247,6 +272,7 @@ func (c *Client) submitWithRetry(submit map[string]any) (int, error) {
 // download it, verify the server-named sha256 and the release signature
 // (trust.go), swap atomically, exit.
 func (c *Client) LoadConfig(selfUpdate bool) error {
+	c.lastConfig = c.Now()
 	status, err := c.call("GET", "/config", nil, &c.cfg)
 	if err != nil {
 		return err
@@ -599,7 +625,7 @@ func (c *Client) pace() {
 }
 
 type Outcome struct {
-	State string // "empty" | "job" | "breaker_open" | "refused"
+	State string // "empty" | "job" | "breaker_open" | "refused" | "too_old"
 	// How long to wait before the next check-in: what the door said, or
 	// idleCheckIn when it said nothing. Zero means now, and only a
 	// granted job earns it.
@@ -644,6 +670,10 @@ func (c *Client) PollOnce(ctx context.Context) (Outcome, error) {
 	if err != nil {
 		return Outcome{}, err
 	}
+	if status == 426 {
+		return c.refusedAsTooOld("lease", &l), nil
+	}
+	c.tooOld = false
 	if status == 429 || status == 409 || status == 401 {
 		c.Log("warn", fmt.Sprintf("lease refused HTTP %d %s %s", status, l.Error, l.Hint))
 		return Outcome{State: "refused", Wait: nextWait(&l, idleCheckIn, minCheckIn)}, nil
@@ -730,9 +760,15 @@ func (c *Client) PollOnce(ctx context.Context) (Outcome, error) {
 		submit["status"] = "error"
 		submit["error"] = map[string]string{"kind": kind}
 	}
-	sStatus, err := c.submitWithRetry(submit)
+	var answer rawBody
+	sStatus, err := c.submitWithRetry(submit, &answer)
 	if err != nil {
 		return Outcome{}, err
+	}
+	if sStatus == 426 {
+		var refusal lease
+		_ = json.Unmarshal(answer, &refusal)
+		return c.refusedAsTooOld("submit", &refusal), nil
 	}
 	if sStatus != 200 {
 		c.Log("warn", fmt.Sprintf("submit refused HTTP %d", sStatus))
@@ -744,6 +780,49 @@ func (c *Client) PollOnce(ctx context.Context) (Outcome, error) {
 	}
 	// There may be more: the door said so when it granted this one.
 	return Outcome{State: "job", Wait: nextWait(&l, 0, 0)}, nil
+}
+
+// tooOldConfigEvery bounds how often a refused-as-too-old client re-reads
+// /config while the refusal lasts: the first 426 re-reads it straight
+// away, and a self-update that failed is retried this often after,
+// rather than on every check-in.
+const tooOldConfigEvery = 5 * time.Minute
+
+// refusedAsTooOld handles 426 client_too_old on /lease or /submit: the hub
+// enforces min_client_version (CollectorMinEnforce) and will refuse this
+// build until it updates. That is broken, not idle, so it is logged at
+// error level once per refusal, and /config - the channel the hub never
+// refuses - is re-read with self-update on, which names the release to
+// update to. The wait is the normal one, so a refusal never loops.
+func (c *Client) refusedAsTooOld(route string, l *lease) Outcome {
+	if !c.tooOld {
+		c.tooOld = true
+		min := l.MinClientVersion
+		if min == "" {
+			min = c.cfg.MinClientVersion
+		}
+		if min == "" {
+			min = "unknown"
+		}
+		msg := fmt.Sprintf("the hub refuses this collector as too old (HTTP 426 %s on %s): version %s, min_client_version %s",
+			l.Error, route, c.Version, min)
+		if l.Hint != "" {
+			msg += " - " + l.Hint
+		}
+		if c.Version == "dev" {
+			msg += "; a dev build never self-updates: rebuild from a current checkout"
+		} else {
+			msg += "; re-reading /config to self-update"
+		}
+		c.Log("error", msg)
+		c.lastConfig = time.Time{}
+	}
+	if c.Now().Sub(c.lastConfig) >= tooOldConfigEvery {
+		if err := c.LoadConfig(true); err != nil {
+			c.Log("warn", "config re-read after client_too_old failed: "+err.Error())
+		}
+	}
+	return Outcome{State: "too_old", Wait: nextWait(l, idleCheckIn, minCheckIn)}
 }
 
 // maxRawBytes is the raw-response safety ceiling, distinct from the
@@ -768,7 +847,6 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 	}
 	c.lastProgress = c.Now()
-	lastConfig := c.Now()
 	lastSummary := c.Now()
 	for ctx.Err() == nil {
 		// Activity summary every ~5 min: the log shows what the
@@ -785,11 +863,10 @@ func (c *Client) Run(ctx context.Context) error {
 				WatchdogTimeout.String()+"; exiting for supervisor restart")
 			os.Exit(1)
 		}
-		if c.Now().Sub(lastConfig) > time.Hour {
+		if c.Now().Sub(c.lastConfig) > time.Hour {
 			if err := c.LoadConfig(true); err != nil {
 				c.Log("warn", "config refresh failed: "+err.Error())
 			}
-			lastConfig = c.Now()
 		}
 		out, err := c.PollOnce(ctx)
 		if err != nil {

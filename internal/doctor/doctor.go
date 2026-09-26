@@ -57,10 +57,15 @@ type Options struct {
 	APIToken string
 	Base     string
 	BaseNote string // what v2.SecureBase said about ELIXIR_API_BASE
-	HTTP     *http.Client
-	Fetch    func(ctx context.Context, path string) crapi.Result
-	Now      func() time.Time
-	HostArch func() string
+	// What every door call reports beside the version (v2/report.go):
+	// the running binary's SHA-256 and the release key fingerprints.
+	// "" sends no header.
+	BinarySHA256 string
+	ReleaseKey   string
+	HTTP         *http.Client
+	Fetch        func(ctx context.Context, path string) crapi.Result
+	Now          func() time.Time
+	HostArch     func() string
 }
 
 func tail4(s string) string {
@@ -222,6 +227,12 @@ func checkElixir(ctx context.Context, o Options) (Check, *config) {
 	}
 	req.Header.Set("authorization", "Bearer "+o.APIToken)
 	req.Header.Set("x-collector-version", o.Version)
+	if o.BinarySHA256 != "" {
+		req.Header.Set("x-collector-binary-sha256", o.BinarySHA256)
+	}
+	if o.ReleaseKey != "" {
+		req.Header.Set("x-collector-release-key", o.ReleaseKey)
+	}
 	res, err := o.HTTP.Do(req)
 	if err != nil {
 		c.Detail += " - unreachable: " + err.Error()

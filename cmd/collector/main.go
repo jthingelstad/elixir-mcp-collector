@@ -66,6 +66,16 @@ func doorHTTP() *http.Client {
 	return &http.Client{Timeout: 30 * time.Second, CheckRedirect: crapi.RefuseDowngrade}
 }
 
+// binarySHA256 is the running binary's hash for the door (v2/report.go);
+// "" when it cannot be read, which only drops the header.
+func binarySHA256() string {
+	sum, err := v2.BinarySHA256("")
+	if err != nil {
+		logJSON("warn", "cannot hash the running binary, so the hub will not see it: "+err.Error())
+	}
+	return sum
+}
+
 // trial is the unproven update this start may be (v2.Guard); nil when
 // there is none. Every deliberate exit goes through it, so a hub outage
 // or a missing token is never mistaken for a crash.
@@ -104,6 +114,10 @@ func runDoctor(env envfile.Result, asJSON bool) {
 		BaseNote: baseNote,
 		HTTP:     doorHTTP(),
 		Fetch:    crapi.New(crToken, version).Fetch,
+		// The same report the collector makes, so doctor's /config call
+		// does not make the hub think the binary changed.
+		BinarySHA256: binarySHA256(),
+		ReleaseKey:   v2.ReleaseKeyFingerprints(),
 	})
 	if asJSON {
 		out, _ := json.MarshalIndent(report, "", "  ")
@@ -158,7 +172,9 @@ func main() {
 		HTTP:    doorHTTP(),
 		Fetch:   fetcher.Fetch,
 		Log:     logJSON,
-		Now:     time.Now,
+		// Once per process: a self-update restarts it anyway.
+		BinarySHA256: binarySHA256(),
+		Now:          time.Now,
 		// Any answer from the hub proves an updated binary.
 		OnResponse: trial.Proven,
 		Sleep: func(d time.Duration) {
