@@ -40,6 +40,14 @@ for f in "$WF"/*.yml; do
   kept="$(grep -c 'persist-credentials: false' "$f")"
   if [ "$checkouts" = "$kept" ]; then ok "$name: no checkout persists the token"
   else no "$name: no checkout persists the token" "$checkouts checkouts, $kept with persist-credentials: false"; fi
+  # The signing key lives in the release environment (deployment
+  # branches: main only). A job that reads it without naming that
+  # environment would get nothing, or, if a repository secret of the
+  # same name ever came back, a key any branch's workflow can read.
+  if grep -q 'secrets.COLLECTOR_SIGNING_KEY' "$f"; then
+    if grep -q '^    environment: release' "$f"; then ok "$name: the signing key is read only in the release environment"
+    else no "$name: the signing key is read only in the release environment" "a job reads COLLECTOR_SIGNING_KEY without 'environment: release'"; fi
+  fi
 done
 
 echo

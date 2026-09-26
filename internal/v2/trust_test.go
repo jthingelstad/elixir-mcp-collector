@@ -784,7 +784,7 @@ func TestCompiledReleaseKey(t *testing.T) {
 // Operators verify an installer with the key the docs publish, so the
 // docs must publish the one compiled in.
 func TestPublishedKeyMatchesTheCompiledOne(t *testing.T) {
-	for _, doc := range []string{"../../README.md", "../../SECURITY.md", "../../docs/recipes/cloud-init.yaml"} {
+	for _, doc := range []string{"../../README.md", "../../SECURITY.md", "../../docs/recipes/cloud-init.yaml", "../../docs/recipes/macos.md", "../../docs/recipes/synology-dsm.md"} {
 		data, err := os.ReadFile(doc)
 		if err != nil {
 			t.Fatal(err)

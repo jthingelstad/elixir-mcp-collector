@@ -66,7 +66,8 @@ ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFvN1mZGTcFXSGnIXf8h33cxAhvrHPYn80BO5FkELh28
 ```
 
 This is an OpenSSH ed25519 key. Its private half exists only as the
-`COLLECTOR_SIGNING_KEY` GitHub Actions secret (plus the maintainer's
+`COLLECTOR_SIGNING_KEY` secret of the repository's `release`
+environment, whose deployment branches are `main` only (plus the maintainer's
 offline backup). `release.yml` signs every release's `SHA256SUMS` with
 it under the namespace `elixir-mcp-collector-release`. It then verifies
 the result with the collector's own verifier and with `ssh-keygen`
@@ -107,8 +108,9 @@ mkdir -p ~/.elixir-mcp-release-key && cd ~/.elixir-mcp-release-key
 ssh-keygen -t ed25519 -N '' -C elixir-mcp-collector-release -f collector-release
 
 # The private half goes straight from the file into the secret; it is
-# never printed or pasted.
-gh secret set COLLECTOR_SIGNING_KEY --repo jthingelstad/elixir-mcp-collector < collector-release
+# never printed or pasted. The release environment must already exist,
+# with deployment branches limited to main (Settings -> Environments).
+gh secret set COLLECTOR_SIGNING_KEY --env release --repo jthingelstad/elixir-mcp-collector < collector-release
 
 ssh-keygen -lf collector-release.pub   # the fingerprint collectors will log
 ```
@@ -137,10 +139,11 @@ signature by any of them.
 
 1. Generate the new key as above, but do not replace the secret yet.
 2. Add its public line beside the old one in `releasekey.go`, the
-   README, this file and the cloud-init recipe. Release and name it.
+   README, this file and the cloud-init, macOS and Synology recipes
+   (`TestPublishedKeyMatchesTheCompiledOne` checks all of them). Release and name it.
    This release is signed with the old key and trusts both.
 3. Wait until the fleet runs it (Admin → Collectors, Version column).
-4. Replace the secret with the new private key. Remove the old line,
+4. Replace the `release` environment's secret with the new private key. Remove the old line,
    then release and name that. It is signed with the new key, and the
    fleet already trusts it.
 

@@ -27,6 +27,10 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # The signing key is a secret of the release environment, whose
+    # deployment branches are main only: a workflow pushed on any other
+    # branch cannot read it.
+    environment: release
     permissions:
       contents: write # gh release create; nothing else
     steps:

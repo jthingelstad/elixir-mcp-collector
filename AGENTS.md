@@ -81,7 +81,8 @@ v2.0.x.
    it: neither the hub nor GitHub alone can push code. Verification is
    stdlib only (`crypto/ed25519`); do not add Sigstore/cosign or any
    dependency for it. The private key lives only in the
-   `COLLECTOR_SIGNING_KEY` Actions secret; never generate, print or
+   `COLLECTOR_SIGNING_KEY` secret of the `release` environment (deployment
+   branches: main only); never generate, print or
    handle it here. `release.yml` refuses to build while the compiled
    key is the placeholder or the secret is missing, and verifies what
    it is about to publish with the collector's own verifier. A
