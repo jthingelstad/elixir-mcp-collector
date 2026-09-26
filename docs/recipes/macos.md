@@ -16,7 +16,7 @@ runs (README, "3. Run it", explains each line):
 ```sh
 base=https://github.com/jthingelstad/elixir-mcp-collector/releases/latest/download
 curl -fsSL -O "$base/install.sh" -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.sig" &&
-echo 'elixir-mcp-collector-release ssh-ed25519 REPLACE_WITH_THE_RELEASE_PUBLIC_KEY' > allowed_signers &&
+echo 'elixir-mcp-collector-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFvN1mZGTcFXSGnIXf8h33cxAhvrHPYn80BO5FkELh28' > allowed_signers &&
 ssh-keygen -Y verify -f allowed_signers -I elixir-mcp-collector-release \
   -n elixir-mcp-collector-release -s SHA256SUMS.sig < SHA256SUMS &&
 grep ' install.sh$' SHA256SUMS | shasum -a 256 -c - &&

@@ -29,7 +29,7 @@ chmod 600 .env
 # signature before anything runs (README, "3. Run it")
 base=https://github.com/jthingelstad/elixir-mcp-collector/releases/latest/download
 curl -fsSL -O "$base/install.sh" -O "$base/run-forever.sh" -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.sig" &&
-echo 'elixir-mcp-collector-release ssh-ed25519 REPLACE_WITH_THE_RELEASE_PUBLIC_KEY' > allowed_signers &&
+echo 'elixir-mcp-collector-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFvN1mZGTcFXSGnIXf8h33cxAhvrHPYn80BO5FkELh28' > allowed_signers &&
 ssh-keygen -Y verify -f allowed_signers -I elixir-mcp-collector-release \
   -n elixir-mcp-collector-release -s SHA256SUMS.sig < SHA256SUMS &&
 grep -E ' (install|run-forever)\.sh$' SHA256SUMS | sha256sum -c - &&

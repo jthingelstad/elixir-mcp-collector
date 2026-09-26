@@ -62,7 +62,7 @@ The rest of the host-side picture is in
 ## The release key
 
 ```
-ssh-ed25519 REPLACE_WITH_THE_RELEASE_PUBLIC_KEY elixir-mcp-collector-release
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFvN1mZGTcFXSGnIXf8h33cxAhvrHPYn80BO5FkELh28 elixir-mcp-collector-release
 ```
 
 This is an OpenSSH ed25519 key. Its private half exists only as the
@@ -86,7 +86,7 @@ Windows 10 1809+ with the OpenSSH client):
 base=https://github.com/jthingelstad/elixir-mcp-collector/releases/latest/download
 # (or .../releases/download/<tag> for a particular release)
 curl -fsSL -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.sig"
-echo 'elixir-mcp-collector-release ssh-ed25519 REPLACE_WITH_THE_RELEASE_PUBLIC_KEY' > allowed_signers
+echo 'elixir-mcp-collector-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFvN1mZGTcFXSGnIXf8h33cxAhvrHPYn80BO5FkELh28' > allowed_signers
 ssh-keygen -Y verify -f allowed_signers -I elixir-mcp-collector-release \
   -n elixir-mcp-collector-release -s SHA256SUMS.sig < SHA256SUMS
 ```

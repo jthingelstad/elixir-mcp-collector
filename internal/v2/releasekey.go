@@ -17,4 +17,4 @@ package v2
 // docs/recipes/cloud-init.yaml publish the same line for operators to
 // verify an installer with; TestPublishedKeyMatchesTheCompiledOne keeps
 // them in step.
-var releasePublicKeys = "ssh-ed25519 REPLACE_WITH_THE_RELEASE_PUBLIC_KEY elixir-mcp-collector-release"
+var releasePublicKeys = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFvN1mZGTcFXSGnIXf8h33cxAhvrHPYn80BO5FkELh28 elixir-mcp-collector-release"

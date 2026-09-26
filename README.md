@@ -109,7 +109,7 @@ downloads afterwards needs trusting. The key is also in
 [`SECURITY.md`](SECURITY.md), which explains it.
 
 ```
-elixir-mcp-collector-release ssh-ed25519 REPLACE_WITH_THE_RELEASE_PUBLIC_KEY
+elixir-mcp-collector-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFvN1mZGTcFXSGnIXf8h33cxAhvrHPYn80BO5FkELh28
 ```
 
 The signature check needs OpenSSH 8.1 or newer (`ssh-keygen`), which
@@ -121,7 +121,7 @@ unless every check passes.
 ```sh
 base=https://github.com/jthingelstad/elixir-mcp-collector/releases/latest/download
 curl -fsSL -O "$base/install.sh" -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.sig" &&
-echo 'elixir-mcp-collector-release ssh-ed25519 REPLACE_WITH_THE_RELEASE_PUBLIC_KEY' > allowed_signers &&
+echo 'elixir-mcp-collector-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFvN1mZGTcFXSGnIXf8h33cxAhvrHPYn80BO5FkELh28' > allowed_signers &&
 ssh-keygen -Y verify -f allowed_signers -I elixir-mcp-collector-release \
   -n elixir-mcp-collector-release -s SHA256SUMS.sig < SHA256SUMS &&
 grep ' install.sh$' SHA256SUMS | shasum -a 256 -c - &&
@@ -141,7 +141,7 @@ one, so a failed check stops it:
   $ErrorActionPreference = "Stop"
   $base = "https://github.com/jthingelstad/elixir-mcp-collector/releases/latest/download"
   foreach ($f in "install.ps1", "SHA256SUMS", "SHA256SUMS.sig") { Invoke-WebRequest "$base/$f" -OutFile $f }
-  Set-Content allowed_signers 'elixir-mcp-collector-release ssh-ed25519 REPLACE_WITH_THE_RELEASE_PUBLIC_KEY' -Encoding ascii
+  Set-Content allowed_signers 'elixir-mcp-collector-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFvN1mZGTcFXSGnIXf8h33cxAhvrHPYn80BO5FkELh28' -Encoding ascii
   cmd /c "ssh-keygen -Y verify -f allowed_signers -I elixir-mcp-collector-release -n elixir-mcp-collector-release -s SHA256SUMS.sig < SHA256SUMS"
   if ($LASTEXITCODE -ne 0) { throw "SHA256SUMS is not signed by the release key - not installing" }
   $want = @(Select-String -Path SHA256SUMS -Pattern ' install\.ps1$')
@@ -160,7 +160,7 @@ install) that starts at logon and restarts on failure.
 ```sh
 base=https://github.com/jthingelstad/elixir-mcp-collector/releases/latest/download
 curl -fsSL -O "$base/install.sh" -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.sig" &&
-echo 'elixir-mcp-collector-release ssh-ed25519 REPLACE_WITH_THE_RELEASE_PUBLIC_KEY' > allowed_signers &&
+echo 'elixir-mcp-collector-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFvN1mZGTcFXSGnIXf8h33cxAhvrHPYn80BO5FkELh28' > allowed_signers &&
 ssh-keygen -Y verify -f allowed_signers -I elixir-mcp-collector-release \
   -n elixir-mcp-collector-release -s SHA256SUMS.sig < SHA256SUMS &&
 grep ' install.sh$' SHA256SUMS | sha256sum -c - &&
@@ -221,7 +221,7 @@ commands above, with `run-forever.sh` added):
 ```sh
 base=https://github.com/jthingelstad/elixir-mcp-collector/releases/latest/download
 curl -fsSL -O "$base/install.sh" -O "$base/run-forever.sh" -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.sig" &&
-echo 'elixir-mcp-collector-release ssh-ed25519 REPLACE_WITH_THE_RELEASE_PUBLIC_KEY' > allowed_signers &&
+echo 'elixir-mcp-collector-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFvN1mZGTcFXSGnIXf8h33cxAhvrHPYn80BO5FkELh28' > allowed_signers &&
 ssh-keygen -Y verify -f allowed_signers -I elixir-mcp-collector-release \
   -n elixir-mcp-collector-release -s SHA256SUMS.sig < SHA256SUMS &&
 grep -E ' (install|run-forever)\.sh$' SHA256SUMS | sha256sum -c - &&

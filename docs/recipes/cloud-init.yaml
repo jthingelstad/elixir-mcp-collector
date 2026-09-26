@@ -95,7 +95,7 @@ runcmd:
   - |
     set -eu
     TAG="latest"
-    KEY="ssh-ed25519 REPLACE_WITH_THE_RELEASE_PUBLIC_KEY"
+    KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFvN1mZGTcFXSGnIXf8h33cxAhvrHPYn80BO5FkELh28"
     case "$TAG" in
       latest) base="https://github.com/jthingelstad/elixir-mcp-collector/releases/latest/download" ;;
       *) base="https://github.com/jthingelstad/elixir-mcp-collector/releases/download/$TAG" ;;
