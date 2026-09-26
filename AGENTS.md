@@ -45,7 +45,11 @@ candidates soak as a dev build (rule 8).
    client change. The queue/API contract is canonical in
    `jthingelstad/elixir-mcp` (`packages/contracts`); this repo's tests
    pin the shapes it produces so drift fails here first, and a contract
-   change lands server-side first.
+   change lands server-side first. Every field the client reads must
+   survive the server dropping it: an absent field decodes to 0, so
+   wherever 0 would be wrong the client falls back to the hub's current
+   value (`idleCheckIn`, `defaultPacingMS`, `defaultOverflowBytes`, the
+   breaker's defaults) - the lesson of issue #7.
 3. **One global rate budget.** More collectors = resilience, never quota
    multiplication (ToS posture). Pacing (~1.5 s floor) and the 5×403
    circuit breaker are load-bearing and server-configured; never remove

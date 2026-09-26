@@ -86,6 +86,16 @@ type Client struct {
 	fetchErrors      int
 }
 
+// What a /config without pacing_ms or overflow_bytes falls back to: the
+// values the hub serves today. A field the hub stops sending decodes to
+// 0, and 0 is wrong for both - no pacing against the CR API, and every
+// body an overflow (the lesson of issue #7). Positive values are the
+// server's to set; these only replace a missing or nonsensical one.
+const (
+	defaultPacingMS      = 1500
+	defaultOverflowBytes = 5_000_000
+)
+
 // WatchdogTimeout: with no successful server contact for this long, the
 // process exits so the supervisor restarts it clean. A wedged-but-alive
 // collector (stale socket, poisoned state) is invisible to launchd's
@@ -181,6 +191,12 @@ func (c *Client) LoadConfig(selfUpdate bool) error {
 	}
 	if status != 200 {
 		return fmt.Errorf("config refused: HTTP %d", status)
+	}
+	if c.cfg.PacingMS <= 0 {
+		c.cfg.PacingMS = defaultPacingMS
+	}
+	if c.cfg.OverflowBytes <= 0 {
+		c.cfg.OverflowBytes = defaultOverflowBytes
 	}
 	// Reconfigure in place rather than rebuilding: this runs hourly, and
 	// a fresh breaker would clear an OPEN one every refresh, resuming
@@ -296,7 +312,9 @@ func nextWait(l *lease, fallback, floor time.Duration) time.Duration {
 // polling) - the door says when to come back, and Run sleeps that long.
 func (c *Client) PollOnce(ctx context.Context) (Outcome, error) {
 	if c.brk.IsOpen() {
-		c.Sleep(time.Duration(c.cfg.Breaker.CooldownS) * time.Second)
+		// The breaker's cooldown, not the config's: a missing cooldown_s
+		// is 0 there, and the breaker defaults it.
+		c.Sleep(c.brk.Cooldown())
 		return Outcome{State: "breaker_open"}, nil
 	}
 	var l lease
