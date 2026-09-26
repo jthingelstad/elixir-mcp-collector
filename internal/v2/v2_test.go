@@ -29,7 +29,7 @@ func TestV2LeaseFetchSubmit(t *testing.T) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/config"):
 			_, _ = w.Write([]byte(`{"pacing_ms":1,"breaker":{"threshold_403":5,"cooldown_s":1},
-				"overflow_bytes":250000,"poll":{"live_wait_s":8,"bulk_wait_s":2,"idle_backoff_s":1},
+				"overflow_bytes":250000,
 				"min_client_version":"2.0.0","gateway":{"name":"t","channel":"bulk","status":"active"},"update":{}}`))
 		case strings.HasSuffix(r.URL.Path, "/lease"):
 			if leased {
@@ -93,7 +93,7 @@ func TestV2LeaseFetchSubmit(t *testing.T) {
 	}
 
 	// Second poll: empty, and no next_check_in_s from this door, so the
-	// config's idle backoff is the wait.
+	// built-in idle interval is the wait.
 	out2, err := c.PollOnce(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -101,8 +101,8 @@ func TestV2LeaseFetchSubmit(t *testing.T) {
 	if out2.State != "empty" {
 		t.Fatalf("expected empty, got %s", out2.State)
 	}
-	if out2.Wait != 1*time.Second {
-		t.Fatalf("expected the idle backoff, got %s", out2.Wait)
+	if out2.Wait != idleCheckIn {
+		t.Fatalf("expected the idle interval, got %s", out2.Wait)
 	}
 }
 
@@ -116,7 +116,7 @@ func TestV2CheckInFollowsTheDoor(t *testing.T) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/config"):
 			_, _ = w.Write([]byte(`{"pacing_ms":1,"breaker":{"threshold_403":5,"cooldown_s":1},
-				"overflow_bytes":250000,"poll":{"live_wait_s":8,"bulk_wait_s":2,"idle_backoff_s":20},
+				"overflow_bytes":250000,
 				"min_client_version":"2.0.0","gateway":{"name":"t","channel":"bulk","status":"active"},"update":{}}`))
 		case strings.HasSuffix(r.URL.Path, "/lease"):
 			var body map[string]any
@@ -167,6 +167,108 @@ func TestV2CheckInFollowsTheDoor(t *testing.T) {
 	}
 }
 
+// Issue #7: the hub retired the `poll` block from /config. Its
+// idle_backoff_s was this client's wait for an answer naming no interval,
+// and a missing block decodes to 0 - "come straight back" - so a 401 or
+// a quarantine 409, neither of which carries next_check_in_s, would be
+// leased against in a tight loop. With no poll block, silence waits the
+// built-in idle interval and no answer that grants no job waits less
+// than a second, whatever the door says.
+func TestV2NoPollBlockNeverLeasesInATightLoop(t *testing.T) {
+	answers := []struct {
+		status int
+		body   string
+		want   time.Duration
+	}{
+		{200, `{"empty":true}`, idleCheckIn},
+		{401, `{"error":"unauthenticated"}`, idleCheckIn},
+		{409, `{"error":"quarantined","hint":"Too many leases expired unsubmitted."}`, idleCheckIn},
+		{429, `{"error":"rate_limited","retry_after_s":1800}`, idleCheckIn},
+		{426, `{"error":"client_too_old"}`, idleCheckIn},
+		{500, `{"error":"internal"}`, idleCheckIn},
+		{200, `{"empty":true,"next_check_in_s":-1}`, idleCheckIn},
+		{200, `{"empty":true,"next_check_in_s":0}`, minCheckIn},
+		{429, `{"error":"lease_cap","next_check_in_s":0}`, minCheckIn},
+		{200, `{"empty":true,"next_check_in_s":7}`, 7 * time.Second},
+	}
+	next := 0
+	door := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/config"):
+			_, _ = w.Write([]byte(`{"pacing_ms":1,"breaker":{"threshold_403":5,"cooldown_s":1},
+				"overflow_bytes":250000,
+				"min_client_version":"2.0.0","gateway":{"name":"t","channel":"bulk","status":"active"},"update":{}}`))
+		case strings.HasSuffix(r.URL.Path, "/lease"):
+			a := answers[next]
+			next++
+			w.WriteHeader(a.status)
+			_, _ = w.Write([]byte(a.body))
+		}
+	}))
+	defer door.Close()
+	c := &Client{
+		Base: door.URL, Token: "emcg_test", Version: "dev", HTTP: door.Client(),
+		Fetch: func(context.Context, string) crapi.Result {
+			t.Fatal("no answer here grants a job")
+			return crapi.Result{}
+		},
+		Log: func(string, string) {}, Now: time.Now, Sleep: func(time.Duration) {},
+	}
+	if err := c.LoadConfig(false); err != nil {
+		t.Fatalf("a config without poll must load: %v", err)
+	}
+	for _, a := range answers {
+		out, err := c.PollOnce(context.Background())
+		if err != nil {
+			t.Fatalf("HTTP %d %s: %v", a.status, a.body, err)
+		}
+		if out.Wait != a.want {
+			t.Fatalf("HTTP %d %s: waited %s, want %s", a.status, a.body, out.Wait, a.want)
+		}
+	}
+}
+
+// The same, end to end: Run against a config with no poll block and a
+// door that answers every check-in empty without naming an interval
+// sleeps before every check-in after the first.
+func TestV2RunWaitsBetweenEmptyCheckIns(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	checkIns := 0
+	door := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/config"):
+			_, _ = w.Write([]byte(`{"pacing_ms":1,"breaker":{"threshold_403":5,"cooldown_s":1},
+				"overflow_bytes":250000,
+				"min_client_version":"2.0.0","gateway":{"name":"t","channel":"bulk","status":"active"},"update":{}}`))
+		case strings.HasSuffix(r.URL.Path, "/lease"):
+			if checkIns++; checkIns == 5 {
+				cancel()
+			}
+			_, _ = w.Write([]byte(`{"empty":true}`))
+		}
+	}))
+	defer door.Close()
+	var slept []time.Duration
+	c := &Client{
+		Base: door.URL, Token: "emcg_test", Version: "dev", HTTP: door.Client(),
+		Fetch: func(context.Context, string) crapi.Result { return crapi.Result{} },
+		Log:   func(string, string) {}, Now: time.Now,
+		Sleep: func(d time.Duration) { slept = append(slept, d) },
+	}
+	if err := c.Run(ctx); err != context.Canceled {
+		t.Fatalf("Run: %v", err)
+	}
+	if checkIns != 5 || len(slept) != 5 {
+		t.Fatalf("%d check-ins, %d sleeps: every empty answer is followed by a wait", checkIns, len(slept))
+	}
+	for _, d := range slept {
+		if d != idleCheckIn {
+			t.Fatalf("slept %s after an empty answer naming no interval, want %s", d, idleCheckIn)
+		}
+	}
+}
+
 // CR errors become error envelopes; 403s feed the breaker.
 func TestV2ErrorAndBreaker(t *testing.T) {
 	var submits []map[string]any
@@ -174,7 +276,7 @@ func TestV2ErrorAndBreaker(t *testing.T) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/config"):
 			_, _ = w.Write([]byte(`{"pacing_ms":1,"breaker":{"threshold_403":5,"cooldown_s":1},
-				"overflow_bytes":250000,"poll":{"live_wait_s":8,"bulk_wait_s":2,"idle_backoff_s":1},
+				"overflow_bytes":250000,
 				"min_client_version":"2.0.0","gateway":{"name":"t","channel":"bulk","status":"active"},"update":{}}`))
 		case strings.HasSuffix(r.URL.Path, "/lease"):
 			_, _ = w.Write([]byte(`{"job":{"endpoint":"player","entity_key":"#2YG98VVQ","lane":"bulk"},
@@ -226,7 +328,7 @@ func runOverflowCase(t *testing.T, body string) (map[string]any, *Client) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/config"):
 			_, _ = w.Write([]byte(`{"pacing_ms":1,"breaker":{"threshold_403":5,"cooldown_s":1},
-				"overflow_bytes":250000,"poll":{"live_wait_s":8,"bulk_wait_s":2,"idle_backoff_s":1},
+				"overflow_bytes":250000,
 				"min_client_version":"2.0.0","gateway":{"name":"t","channel":"bulk","status":"active"},"update":{}}`))
 		case strings.HasSuffix(r.URL.Path, "/lease"):
 			if leased {
@@ -319,7 +421,7 @@ func TestV2BreakerHonoursServerConfig(t *testing.T) {
 		case strings.HasSuffix(r.URL.Path, "/config"):
 			// Deliberately NOT the defaults: 2 strikes, 30s cooldown.
 			_, _ = w.Write([]byte(`{"pacing_ms":1,"breaker":{"threshold_403":2,"cooldown_s":30},
-				"overflow_bytes":250000,"poll":{"live_wait_s":8,"bulk_wait_s":2,"idle_backoff_s":1},
+				"overflow_bytes":250000,
 				"min_client_version":"2.0.0","gateway":{"name":"t","channel":"bulk","status":"active"},"update":{}}`))
 		case strings.HasSuffix(r.URL.Path, "/lease"):
 			_, _ = w.Write([]byte(`{"job":{"endpoint":"player","entity_key":"#2YG98VVQ","lane":"bulk"},
@@ -377,7 +479,7 @@ func TestV2ConfigRefreshKeepsBreakerOpen(t *testing.T) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/config"):
 			_, _ = w.Write([]byte(`{"pacing_ms":1,"breaker":{"threshold_403":2,"cooldown_s":300},
-				"overflow_bytes":250000,"poll":{"live_wait_s":8,"bulk_wait_s":2,"idle_backoff_s":1},
+				"overflow_bytes":250000,
 				"min_client_version":"2.0.0","gateway":{"name":"t","channel":"bulk","status":"active"},"update":{}}`))
 		case strings.HasSuffix(r.URL.Path, "/lease"):
 			_, _ = w.Write([]byte(`{"job":{"endpoint":"player","entity_key":"#2YG98VVQ","lane":"bulk"},
@@ -427,7 +529,7 @@ func TestV2SubmitRetriesTransientServerFailureWithSameLease(t *testing.T) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/config"):
 			_, _ = w.Write([]byte(`{"pacing_ms":1,"breaker":{"threshold_403":5,"cooldown_s":1},
-				"overflow_bytes":250000,"poll":{"live_wait_s":8,"bulk_wait_s":2,"idle_backoff_s":1},
+				"overflow_bytes":250000,
 				"submit_retry":{"max_attempts":3,"timeout_s":20,"backoff_ms":1},
 				"min_client_version":"2.0.0","gateway":{"name":"t","channel":"bulk","status":"active"},"update":{}}`))
 		case strings.HasSuffix(r.URL.Path, "/lease"):
@@ -485,7 +587,7 @@ func TestV2LeaseFilterDropsBattlesTheHubHolds(t *testing.T) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/config"):
 			_, _ = w.Write([]byte(`{"pacing_ms":1,"breaker":{"threshold_403":5,"cooldown_s":1},
-				"overflow_bytes":250000,"poll":{"live_wait_s":8,"bulk_wait_s":2,"idle_backoff_s":1},
+				"overflow_bytes":250000,
 				"min_client_version":"2.0.0","gateway":{"name":"t","channel":"live","status":"active"},"update":{}}`))
 		case strings.HasSuffix(r.URL.Path, "/lease"):
 			if len(leases) == 0 {
