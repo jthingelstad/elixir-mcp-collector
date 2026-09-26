@@ -179,6 +179,10 @@ func (c *Client) callWithHTTP(client *http.Client, method, route string, body an
 	if err != nil {
 		return res.StatusCode, err
 	}
+	// A response from the door - any status, any body, even one too
+	// large or malformed to use - is progress: the process is not
+	// wedged, so the watchdog must not restart it (AGENTS.md rule 6).
+	c.lastProgress = c.Now()
 	if len(data) > maxDoorBytes && out != nil {
 		return res.StatusCode, fmt.Errorf("%s %s: response over %d bytes", method, route, maxDoorBytes)
 	}
@@ -187,9 +191,6 @@ func (c *Client) callWithHTTP(client *http.Client, method, route string, body an
 			return res.StatusCode, err
 		}
 	}
-	// A response from the door - any status - is progress: the process
-	// is not wedged.
-	c.lastProgress = c.Now()
 	return res.StatusCode, nil
 }
 

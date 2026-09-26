@@ -68,9 +68,29 @@ func TestOversizedDoorAnswerIsACleanError(t *testing.T) {
 		_, _ = w.Write([]byte(`"}`))
 	}))
 	defer door.Close()
-	err := testClient(door.URL, nil).LoadConfig(false)
+	c := testClient(door.URL, nil)
+	err := c.LoadConfig(false)
 	if err == nil || !strings.Contains(err.Error(), "response over") {
 		t.Fatalf("got %v", err)
+	}
+	// The door answered, so the watchdog must see progress (rule 6).
+	if c.lastProgress.IsZero() {
+		t.Fatal("an oversized answer is still a door response and counts as progress")
+	}
+}
+
+// Same for an answer that does not parse.
+func TestMalformedDoorAnswerCountsAsProgress(t *testing.T) {
+	door := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`<html>bad gateway</html>`))
+	}))
+	defer door.Close()
+	c := testClient(door.URL, nil)
+	if err := c.LoadConfig(false); err == nil {
+		t.Fatal("expected a parse error")
+	}
+	if c.lastProgress.IsZero() {
+		t.Fatal("a malformed answer is still a door response and counts as progress")
 	}
 }
 
