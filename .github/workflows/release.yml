@@ -19,13 +19,24 @@ jobs:
       - name: build matrix
         run: |
           set -euo pipefail
-          # 2.0.x is the ZERO-TRUST CLIENT GENERATION, and it is the
-          # number the server's min_client_version gates on. Before this
-          # the binaries said v0.1.x while the door asked for 2.0.0 -
-          # two different kinds of number, which is why nothing could
-          # enforce it. Keep the major at 2 for as long as the
-          # config/lease/submit contract holds.
-          VERSION="v2.0.${{ github.run_number }}"
+          # v3.0.x since 2026-09-26. The major used to follow the
+          # config/lease/submit contract: 2 was the zero-trust client
+          # generation, and the door's min_client_version still gates on
+          # these numbers. The contract has not changed; the client
+          # around it has, enough to be a generation of its own: Go only
+          # (the Python twin is gone), an updater that rolls back a
+          # release that cannot start, and releases that are signed and
+          # verified before they run. Move the major again for a change
+          # of that size, or when the contract itself changes.
+          # The patch is the next one no tag has used
+          # (scripts/next-version.sh): the merge that moved the major
+          # built exactly v3.0.0, each green push after it builds the
+          # next, nobody tags by hand, and a number is never reused.
+          # Every v3 is above every v2.0.x, which is how the hub
+          # compares; the script refuses to build a version that is not
+          # above every release tag.
+          VERSION="$(git ls-remote --tags --refs "${{ github.server_url }}/${{ github.repository }}" \
+            | sh scripts/next-version.sh 3 0)"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           mkdir -p dist
           build() {

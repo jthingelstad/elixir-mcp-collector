@@ -324,8 +324,14 @@ update failure never stops collection.
 line in your log is the answer:
 
 ```
-{"level":"info","msg":"gateway up (go, zero-trust v2) version=v0.1.14"}
+{"level":"info","msg":"gateway up (go, zero-trust v2) version=v3.0.4"}
 ```
+
+Versions are `v3.0.x`. Each release is the next patch, and a higher
+number is always newer. The major moved from 2 to 3 on 2026-09-26 for
+the Go-only collector with an updater that rolls itself back and
+releases that are signed and verified before they run. The contract
+with Elixir MCP is unchanged, and every `v3` is newer than every `v2`.
 
 The collector also sends that version to the server on every call, so
 the maintainer can see your version even when you cannot.

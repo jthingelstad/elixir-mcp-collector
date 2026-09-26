@@ -27,6 +27,18 @@ it (the `poll` block, issue #7). Do not bring it back or add a second
 implementation: release insurance moves into the Go updater, and
 candidates soak as a dev build (rule 8).
 
+**Versions are v3.0.x since 2026-09-26 (Jamie's decision).** v2.0.x
+named the zero-trust client generation that speaks config/lease/submit.
+That contract is unchanged, but the client around it moved enough to
+be a generation of its own: Go only, an updater that rolls back a
+release that cannot start (PR #10), and releases that are signed and
+verified before they run (issue #5). `release.yml` numbers each green
+push with the next patch no tag has used (`scripts/next-version.sh`),
+so the merge that moved the major built exactly v3.0.0 and nobody tags
+by hand. Never reuse or lower a number: the hub compares
+major.minor.patch numerically, and every v3 must stay above every
+v2.0.x.
+
 ## Rules
 
 1. **This repo is PUBLIC; secrets never enter it — or agent context.**
