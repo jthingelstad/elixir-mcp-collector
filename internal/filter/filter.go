@@ -1,7 +1,7 @@
 // Package filter applies what a lease asks the collector to drop before
 // submitting. The hub owns the decision (it hands the mark in the lease);
-// this is the mechanical part, kept apart so both twins pin it the same
-// way. The body stays the API's own array - fewer entries, same shape.
+// this is the mechanical part, kept apart so its tests pin it on its
+// own. The body stays the API's own array - fewer entries, same shape.
 package filter
 
 import (

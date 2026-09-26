@@ -33,12 +33,7 @@ type Config struct {
 		CooldownS    int `json:"cooldown_s"`
 	} `json:"breaker"`
 	OverflowBytes int `json:"overflow_bytes"`
-	Poll          struct {
-		LiveWaitS    int `json:"live_wait_s"`
-		BulkWaitS    int `json:"bulk_wait_s"`
-		IdleBackoffS int `json:"idle_backoff_s"`
-	} `json:"poll"`
-	SubmitRetry struct {
+	SubmitRetry   struct {
 		MaxAttempts int `json:"max_attempts"`
 		TimeoutS    int `json:"timeout_s"`
 		BackoffMS   int `json:"backoff_ms"`
@@ -66,7 +61,8 @@ type lease struct {
 	Filter *filter.Filter `json:"filter"`
 	// When to check in again (2026-09-11): 0 while work remains for us,
 	// the idle interval otherwise. Absent from a door older than the
-	// check-in contract, in which case the config's idle backoff stands.
+	// check-in contract and from most refusals, in which case idleCheckIn
+	// stands.
 	NextCheckInS *int   `json:"next_check_in_s"`
 	Error        string `json:"error"`
 	Hint         string `json:"hint"`
@@ -89,6 +85,16 @@ type Client struct {
 	jobsDone         int       // activity counters, flushed to the log
 	fetchErrors      int
 }
+
+// What a /config without pacing_ms or overflow_bytes falls back to: the
+// values the hub serves today. A field the hub stops sending decodes to
+// 0, and 0 is wrong for both - no pacing against the CR API, and every
+// body an overflow (the lesson of issue #7). Positive values are the
+// server's to set; these only replace a missing or nonsensical one.
+const (
+	defaultPacingMS      = 1500
+	defaultOverflowBytes = 5_000_000
+)
 
 // WatchdogTimeout: with no successful server contact for this long, the
 // process exits so the supervisor restarts it clean. A wedged-but-alive
@@ -186,6 +192,12 @@ func (c *Client) LoadConfig(selfUpdate bool) error {
 	if status != 200 {
 		return fmt.Errorf("config refused: HTTP %d", status)
 	}
+	if c.cfg.PacingMS <= 0 {
+		c.cfg.PacingMS = defaultPacingMS
+	}
+	if c.cfg.OverflowBytes <= 0 {
+		c.cfg.OverflowBytes = defaultOverflowBytes
+	}
 	// Reconfigure in place rather than rebuilding: this runs hourly, and
 	// a fresh breaker would clear an OPEN one every refresh, resuming
 	// fetches the server had already told this collector to stop.
@@ -267,17 +279,31 @@ func (c *Client) pace() {
 type Outcome struct {
 	State string // "empty" | "job" | "breaker_open" | "refused"
 	// How long to wait before the next check-in: what the door said, or
-	// the config's idle backoff when it said nothing. Zero means now.
+	// idleCheckIn when it said nothing. Zero means now, and only a
+	// granted job earns it.
 	Wait time.Duration
 }
 
-// nextWait reads the door's next_check_in_s, falling back to the config's
-// idle backoff for a door that predates check-ins.
-func (c *Client) nextWait(l *lease, fallbackS int) time.Duration {
-	if l != nil && l.NextCheckInS != nil && *l.NextCheckInS >= 0 {
-		return time.Duration(*l.NextCheckInS) * time.Second
+// idleCheckIn is the wait when the door names none. It used to be the
+// config's poll.idle_backoff_s, which decodes to 0 - "come straight
+// back" - once the hub stops sending the block (issue #7). Built in now,
+// at the 20 s the hub served there, so a door that names no interval
+// hears from this client exactly as often as before.
+const idleCheckIn = 20 * time.Second
+
+// minCheckIn floors the wait after an answer that granted no job. The
+// hub's idle answer is never below it (1-15 s, phased per collector); a
+// 0 there, repeated, would lease against the door in a tight loop.
+const minCheckIn = 1 * time.Second
+
+// nextWait reads the door's next_check_in_s: fallback when it named none,
+// and never less than floor.
+func nextWait(l *lease, fallback, floor time.Duration) time.Duration {
+	wait := fallback
+	if l.NextCheckInS != nil && *l.NextCheckInS >= 0 {
+		wait = time.Duration(*l.NextCheckInS) * time.Second
 	}
-	return time.Duration(fallbackS) * time.Second
+	return max(wait, floor)
 }
 
 // PollOnce checks in once: leases a job if the door has one, fetches it
@@ -286,7 +312,9 @@ func (c *Client) nextWait(l *lease, fallbackS int) time.Duration {
 // polling) - the door says when to come back, and Run sleeps that long.
 func (c *Client) PollOnce(ctx context.Context) (Outcome, error) {
 	if c.brk.IsOpen() {
-		c.Sleep(time.Duration(c.cfg.Breaker.CooldownS) * time.Second)
+		// The breaker's cooldown, not the config's: a missing cooldown_s
+		// is 0 there, and the breaker defaults it.
+		c.Sleep(c.brk.Cooldown())
 		return Outcome{State: "breaker_open"}, nil
 	}
 	var l lease
@@ -296,10 +324,10 @@ func (c *Client) PollOnce(ctx context.Context) (Outcome, error) {
 	}
 	if status == 429 || status == 409 || status == 401 {
 		c.Log("warn", fmt.Sprintf("lease refused HTTP %d %s %s", status, l.Error, l.Hint))
-		return Outcome{State: "refused", Wait: c.nextWait(&l, c.cfg.Poll.IdleBackoffS)}, nil
+		return Outcome{State: "refused", Wait: nextWait(&l, idleCheckIn, minCheckIn)}, nil
 	}
 	if l.Empty || l.Lease == "" {
-		return Outcome{State: "empty", Wait: c.nextWait(&l, c.cfg.Poll.IdleBackoffS)}, nil
+		return Outcome{State: "empty", Wait: nextWait(&l, idleCheckIn, minCheckIn)}, nil
 	}
 
 	c.pace()
@@ -387,7 +415,7 @@ func (c *Client) PollOnce(ctx context.Context) (Outcome, error) {
 		c.fetchErrors++
 	}
 	// There may be more: the door said so when it granted this one.
-	return Outcome{State: "job", Wait: c.nextWait(&l, 0)}, nil
+	return Outcome{State: "job", Wait: nextWait(&l, 0, 0)}, nil
 }
 
 // maxRawBytes is the raw-response safety ceiling, distinct from the

@@ -20,19 +20,16 @@
 #   2. its parent directory
 #   3. the current working directory
 # and runs the first executable "collector" it finds. With no binary
-# anywhere it falls back to the Python twin (python/collector.py), and
-# with neither it exits non-zero with a message instead of looping.
+# anywhere it exits non-zero with a message instead of looping.
 #
 # Start-up failures print to stderr AND are mirrored into the log when
 # a log is writable, because under DSM Task Scheduler and systemd
 # nobody ever sees stderr. The log defaults to collector.log next to
-# whichever worker is found; the optional [logfile] argument overrides
-# that.
+# the binary; the optional [logfile] argument overrides that.
 #
-# The worker reads .env from ITS OWN directory (or $ELIXIR_MCP_ENV_FILE)
-# — the Go binary looks beside the binary, python/collector.py looks
-# beside collector.py. This loop does not care about the working
-# directory.
+# The collector reads .env from ITS OWN directory (or
+# $ELIXIR_MCP_ENV_FILE), beside the binary. This loop does not care
+# about the working directory.
 #
 # Exit code 2 from the worker means bad configuration (a missing
 # CR_API_TOKEN or ELIXIR_API_TOKEN). No number of restarts conjures a
@@ -40,7 +37,6 @@
 # Every other exit is restarted: crash, watchdog, or self-update.
 #
 # Environment:
-#   PYTHON_BIN     which python runs the Python twin (default python3)
 #   MAX_LOG_BYTES  rotate the log past this size (default 10485760;
 #                  0 disables). One .1 generation is kept.
 
@@ -103,7 +99,6 @@ for d in "$SCRIPT_DIR" "$PARENT_DIR" "$HERE_DIR"; do
 done
 
 CMD=""
-PY_WORKER=""
 WORKER_DIR=""
 SEARCHED=""
 
@@ -116,26 +111,8 @@ for d in "$@"; do
 done
 
 if [ -z "$CMD" ]; then
-  for d in "$@"; do
-    for rel in python/collector.py collector.py; do
-      if [ -z "$PY_WORKER" ] && [ -f "$d/$rel" ]; then
-        PY_WORKER="$d/$rel"
-        WORKER_DIR="$(CDPATH= cd -- "$(dirname -- "$d/$rel")" && pwd)"
-      fi
-    done
-  done
-fi
-
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-
-if [ -z "$CMD" ] && [ -n "$PY_WORKER" ]; then
-  command -v "$PYTHON_BIN" >/dev/null 2>&1 || fatal \
-"no collector binary found near $SEARCHED, and the Python worker at $PY_WORKER cannot run ($PYTHON_BIN not on PATH). Install the binary next to this script, or set PYTHON_BIN."
-fi
-
-if [ -z "$CMD" ] && [ -z "$PY_WORKER" ]; then
   fatal \
-"no collector binary found near $SEARCHED and no Python worker present. Put the collector binary next to this script (see scripts/install.sh) or run this from the directory holding it."
+"no collector binary found near $SEARCHED. Put the collector binary next to this script (see scripts/install.sh) or run this from the directory holding it."
 fi
 
 if [ -n "$LOG_OVERRIDE" ]; then
@@ -150,11 +127,7 @@ LOG_DIR="$(dirname -- "$LOG")"
 ( : >>"$LOG" ) 2>/dev/null || fatal \
 "cannot write log file $LOG (permission denied). Pass a writable path: sh run-forever.sh /path/to/collector.log"
 
-if [ -n "$CMD" ]; then
-  DESC="Go collector ($CMD)"
-else
-  DESC="Python worker ($PYTHON_BIN $PY_WORKER)"
-fi
+DESC="Go collector ($CMD)"
 
 if [ "$CHECK" = 1 ]; then
   echo "run-forever: would run $DESC"
@@ -177,11 +150,7 @@ rotate_log() {
 echo "$(stamp) run-forever: starting $DESC (log=$LOG)" >>"$LOG"
 
 while :; do
-  if [ -n "$CMD" ]; then
-    "$CMD" >>"$LOG" 2>&1
-  else
-    "$PYTHON_BIN" "$PY_WORKER" >>"$LOG" 2>&1
-  fi
+  "$CMD" >>"$LOG" 2>&1
   code=$?
   if [ "$code" -eq 2 ]; then
     # Configuration error. Restarting cannot fix it, and a 2s spin just

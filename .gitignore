@@ -3,5 +3,3 @@ node_modules/
 .env.*
 !.env.example
 bin/
-__pycache__/
-*.pyc

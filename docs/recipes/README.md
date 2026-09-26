@@ -22,9 +22,9 @@ address. That is fine if it is static or changes rarely (you update the
 key's allowlist when it does); if it changes often, a $0 cloud VM with a
 reserved IP is less trouble.
 
-Every recipe ends the same way: `collector doctor` (or
-`python3 collector.py --check`), which says in words whether the box is
-healthy, waiting to be promoted, or broken and how.
+Every recipe ends the same way: `collector doctor`, which says in
+words whether the box is healthy, waiting to be promoted, or broken and
+how.
 
 ## Not documented on purpose
 

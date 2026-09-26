@@ -22,8 +22,7 @@ Billing → Budgets so any surprise is a notification, not a bill).
   provisions reliably. The Ampere `A1.Flex` shape is also free and
   bigger, but "Out of host capacity" is common and the collector does
   not need it.
-- **Image:** Oracle Linux 9 (cloud-init present; Python 3.9 if you want
-  the Python twin). Ubuntu works too.
+- **Image:** Oracle Linux 9 (cloud-init present). Ubuntu works too.
 - **Networking:** create the instance with a public IP **ephemeral**,
   then swap it for a reserved one (below). Or pick "No public IP" at
   create and attach the reserved IP afterwards — either way.

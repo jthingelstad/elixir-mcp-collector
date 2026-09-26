@@ -66,8 +66,8 @@ func TestZeroConfigFallsBackToDefaults(t *testing.T) {
 	if !b.Record403() {
 		t.Fatal("must open at the default threshold")
 	}
-	if b.cooldown != DefaultCooldownS*time.Second {
-		t.Fatalf("cooldown = %v, want the default", b.cooldown)
+	if b.Cooldown() != DefaultCooldownS*time.Second {
+		t.Fatalf("cooldown = %v, want the default", b.Cooldown())
 	}
 	b = New(at(clock), -3, -9)
 	if b.threshold != DefaultThreshold || b.cooldown != DefaultCooldownS*time.Second {

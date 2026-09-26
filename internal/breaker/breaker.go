@@ -54,6 +54,11 @@ func (b *Breaker) Configure(threshold, cooldownS int) {
 	b.cooldown = time.Duration(cooldownS) * time.Second
 }
 
+// Cooldown is how long the breaker stays open: the server's value, or
+// the default when it named none. Wait out an open breaker with this,
+// never the raw config value, which is 0 when the field is absent.
+func (b *Breaker) Cooldown() time.Duration { return b.cooldown }
+
 func (b *Breaker) RecordSuccess() {
 	b.consecutive403 = 0
 	b.openedAt = nil
