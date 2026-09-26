@@ -204,6 +204,11 @@ else
 fi
 
 # --- 7. a release that crashes at startup is rolled back ---
+# The rollback needs every start systemd allows (5 in 10 s by default:
+# update exit, three crashes, the restored build). Let the window of the
+# restart in step 6 pass first, or it counts against them.
+sleep 11
+$SUDO systemctl reset-failed "$UNIT_INST" >/dev/null 2>&1
 name "$V_BAD" "$BAD_SHA"
 $SUDO systemctl restart "$UNIT_INST"   # the hourly config check, now
 if wait_for 30 "gateway up (fake) version=$V_BAD"; then ok "the bad release passes the self-check and is installed"
