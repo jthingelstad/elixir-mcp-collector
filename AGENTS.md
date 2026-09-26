@@ -178,16 +178,30 @@ v2.0.x.
 
 9. **Every change lands through a pull request**, Jamie's and every
    agent's alike (Jamie, 2026-09-26). A ruleset on `main` enforces it
-   with no bypass: no direct push, no force push, no deletion. A PR
-   merges only when `.github/workflows/validate.yml`'s seven jobs pass,
-   as required checks: `gofmt`, `go vet`, `go test`; the
-   `run-forever.sh` and `install.sh` shell tests under `sh` and `dash`
-   and the workflow hygiene check; `go test` on macOS and Windows; the
-   `install.ps1` ACL, wrapper and verify tests; and the hardened unit
-   under real systemd on x86_64 and arm64. No approval is required
-   (agents push as Jamie, and nobody can approve their own PR), so an
-   agent opens its PR and merges it itself with
-   `gh pr merge --auto --merge`, which waits for the checks. Every merge
+   with no bypass: no direct push, no force push, no deletion, and
+   linear history (rebase merges only, the branch up to date with
+   `main`). A PR merges only on one required check, `validate`, the
+   aggregate job at the end of `.github/workflows/validate.yml` that is
+   green only when every other job there passed: `gofmt`, `go vet`,
+   `go test`; the `run-forever.sh` and `install.sh` shell tests under
+   `sh` and `dash` and the workflow hygiene check; `go test` on macOS
+   and Windows; the `install.ps1` ACL, wrapper and verify tests; and the
+   hardened unit under real systemd on x86_64 and arm64. A new job
+   joins that job's `needs:`, and renaming it means changing the
+   ruleset in the same breath. No approval is required (agents push as
+   Jamie, and nobody can approve their own PR), so an agent lands its
+   own work: `git switch -c <topic>/<slug>` before the first edit,
+   commit, `git push -u origin HEAD`, `gh pr create --fill`,
+   `gh pr merge --auto --rebase --delete-branch` (which waits for the
+   check), `gh pr checks --watch --fail-fast`, then
+   `git switch main && git pull --ff-only`. If `main` moves under an
+   open PR, `gh pr update-branch --rebase`. A rebase merge gives the
+   commit a new SHA on `main`; anything that follows "my commit's
+   release" reads it from `gh pr view <n> --json mergeCommit`. A check
+   that fails and then passes on re-run is a flake, and a flake is a
+   defect: fix it in the PR or record it the same day. Unfinished work
+   stays an open PR and the checkout goes back to `main`. Outside
+   contributors fork and open a PR against the same check. Every merge
    builds a signed candidate (`release.yml`), so `main` must stay
    releasable; nothing reaches the fleet until the hub names a release,
    and naming stays Jamie's. Every Action is pinned to a full commit SHA
