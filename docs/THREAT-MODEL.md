@@ -38,7 +38,7 @@ and no user-space program can protect its secrets from them.
 | Against | Guarantee | Where |
 |---|---|---|
 | 1 | A group- or world-readable `.env` is tightened to owner-only at startup and logged. Doctor reports it. The collector repairs and warns, and never refuses to start, so an automatic update cannot stop a collector that was running. | `internal/envfile` |
-| 1 | Self-update writes a new file under a random name, created exclusively (`O_EXCL`) in the binary's directory, then fsyncs it and checks it is still the file it wrote. It renames it over the binary in one step and fsyncs the directory. Nothing follows a link planted in that directory, and a failure leaves the old binary in place. | `installBinary` in `internal/v2` |
+| 1 | Self-update writes a new file under a random name, created exclusively (`O_EXCL`) in the binary's directory, then fsyncs it and checks it is still the file it wrote. It runs it once with `version` (no tokens, no `.env`) and requires the named version, then renames it over the binary in one step and fsyncs the directory. Nothing follows a link planted in that directory, and a failure leaves the old binary in place. The replaced binary is kept until the new one gets an answer from the hub; a new one that keeps crashing before that is rolled back and its version refused on this host. | `installBinary`, `fallback.go` in `internal/v2` |
 | 2 | The bearer is sent over HTTPS only. A plain `http://` `ELIXIR_API_BASE` is switched to `https://`, except on loopback. A redirect from https down to http is refused, and Go already drops `Authorization` when a redirect goes to another host. | `v2.SecureBase`, `crapi.RefuseDowngrade` |
 | 3 | Every response read is capped at its limit plus one byte, after gzip decoding: 8 MiB from the CR API (reported to the hub as an overflow), 1 MiB from the door (a clear error), 200 MiB for an update. A declared `Content-Length` over the limit is refused before any read. | `crapi.Fetch`, `callWithHTTP`, `applyUpdate` |
 | 4 | The client installs only the exact version and SHA-256 named by the hub's `/config`, never "latest". | README, "Staying current" |
@@ -52,14 +52,20 @@ and no user-space program can protect its secrets from them.
 | Process sandbox | yes: no capabilities, `NoNewPrivileges`, the filesystem read-only except the collector's directory, private `/tmp` and devices, the kernel hidden, `@system-service` syscalls, IP and Unix sockets only | none; runs as your user with your user's access | none; runs as your user | none; runs as the user the task is set to (keep it off `root`) |
 | Binary directory writable only by the collector's account | yes, if you follow the recipe (`/opt/elixir-collector` owned by `collector`) | your home folder | your profile folder | a folder you own (README, Synology steps) |
 | Restart on crash, on the watchdog and after an update; stop on exit 2 | `Restart=always`, `RestartPreventExitStatus=2` | `KeepAlive`, **but launchd does not stop on exit 2** | task restart settings; **exit 2 is retried** | the loop stops on exit 2 |
-| Tested in CI | the unit under real systemd on ubuntu-latest (x86_64): start, `.env` repair, self-update through the sandbox, exit 2 | `go test` on macos-latest | `go test` and the ACL block of `install.ps1` on windows-latest | `run-forever.sh` under `sh` and `dash` |
+| Update swap never leaves the start path empty | yes (link aside, one rename) | yes | two renames; `run-collector.cmd` restores `collector.exe.prev` if power is lost between them (installs from before 2026-09-26 need `install.ps1` re-run) | yes |
+| A crash-looping update is restarted into the rollback | yes: a trial panic dies by SIGABRT, which `RestartPreventExitStatus=2` does not match | `KeepAlive` restarts any exit | task restart settings (exit 2 is retried) | yes: SIGABRT is not exit 2 |
+| Tested in CI | the unit under real systemd on ubuntu-latest (x86_64) and ubuntu-24.04-arm (arm64): start, `.env` repair, self-update through the sandbox, rollback of a release that crashes at startup, exit 2 | `go test` on macos-latest, including the fallback's real-process rollback | `go test` (including the rollback of a running .exe) and the ACL and wrapper blocks of `install.ps1` on windows-latest | `run-forever.sh` under `sh` and `dash` |
 
 Gaps a later change could close:
 
 - The collector does not check the ACL on a Windows `.env`. It would
   need a raw `advapi32` call, and the module has no dependencies.
-- The hardened unit is tested on x86_64 only. The directives are not
-  architecture-specific, and `SystemCallArchitectures=native` is left
-  out on purpose so the armv7 build works on a 64-bit ARM kernel.
+- The hardened unit is tested on x86_64 and arm64, not armv7.
+  `SystemCallArchitectures=native` is left out on purpose so the armv7
+  build works on a 64-bit ARM kernel.
+- The update rollback cannot tell a release whose every request fails
+  before a response (broken TLS setup, say) from a hub outage, so it
+  does not roll that back. It also runs inside the release it guards,
+  so a release that breaks the guard itself is not covered.
 - launchd and Task Scheduler restart after exit 2 (a missing token).
   That costs a restart every 10 seconds or every minute, not a failure.

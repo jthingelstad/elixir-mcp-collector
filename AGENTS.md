@@ -78,10 +78,28 @@ candidates soak as a dev build (rule 8).
    `infra/scripts/name-collector-release.mjs`; procedure in
    `docs/RELEASING-COLLECTOR.md`). Cross-platform: release.yml
    builds macOS (arm64/amd64), Windows (amd64/arm64), and Linux
-   (amd64/arm64/armv7). Windows self-update renames the running .exe
-   aside (can't overwrite a locked binary) and cleans the `.old` at next
-   startup. README "Staying current" is the operator-facing version of
-   all this and must stay true to `internal/v2/v2.go`.
+   (amd64/arm64/armv7). **The way back from a bad release lives in the
+   updater** (`internal/v2/fallback.go`, 2026-09-26). Before the swap,
+   the staged candidate is run with `collector version` (first thing
+   in `main`: no `.env`, no tokens, no network) and must report the
+   named version. A release older than `version` is recognised by its
+   token-check exit and accepted, so naming an older release still
+   rolls the fleet back. The swap keeps the replaced binary as
+   `<bin>.prev` and opens `<bin>.trial`. Until the first door response
+   (any response, the watchdog's rule), `v2.Guard` counts starts that
+   died without a clean exit. After three it restores `.prev`, writes
+   `<bin>.refused`, and exits 1. Every deliberate exit before the proof
+   goes through `Trial.End`, so an outage is never a crash; keep it
+   that way when adding an exit path to `main`. A trial panics by
+   SIGABRT, not exit 2, or systemd and `run-forever.sh` would stop
+   instead of restarting into the rollback. `.refused` holds exactly
+   one version: the one that failed on this machine. It clears itself
+   the moment the hub names any other. It is NOT a pin and must never
+   grow into one: no flag, no env var, no operator-chosen version.
+   Windows swaps with two renames (the running .exe is renamed aside),
+   and `run-collector.cmd` restores `.prev` if power is lost between
+   them. README "Staying current" is the operator-facing version of all
+   this and must stay true to `internal/v2/v2.go` and `fallback.go`.
 5. **Exit codes are the supervisor contract.** 2 means the config will
    never work (a missing token): `run-forever.sh` stops, systemd has
    `RestartPreventExitStatus=2`, and no supervisor should spin on it.
@@ -105,10 +123,16 @@ candidates soak as a dev build (rule 8).
    (`go build -o collector ./cmd/collector`) on one machine: a released
    binary cannot soak, because it downgrades itself to the named version
    within seconds, while a dev build never self-updates. A dev build
-   does not exercise the update path, so until the Go updater carries
-   the insurance the twin used to, review changes to startup and
-   self-update with the fleet in mind: a release that breaks either
-   cannot be undone by naming its predecessor. Never flip the
+   does not exercise the update path. The updater now carries the
+   insurance the twin used to: a candidate that fails `version`, or
+   crashes before its first door response, is rolled back on each
+   machine (rule 4). That net has holes, so still review changes to
+   startup and self-update with the fleet in mind. A release whose
+   requests all fail before any response (broken TLS, a bad base URL)
+   looks like an outage and is not rolled back. A release that breaks
+   `v2.Guard` or the updater itself breaks the net it would fall into.
+   And the first release carrying the fallback was installed without
+   it. Never flip the
    prerelease flag by hand or the release page starts lying about what
    is live. Procedure, including rollback and the platform-key trap
    that fails silently: `docs/RELEASING-COLLECTOR.md` in the elixir-mcp
@@ -116,8 +140,9 @@ candidates soak as a dev build (rule 8).
 
 9. Work lands on `main`; CI (`gofmt`, `go vet`, `go test`, and the
    `run-forever.sh` and `install.sh` shell tests under `sh` and `dash`,
-   `go test` on macOS and Windows, the `install.ps1` ACL test, and the
-   hardened unit under real systemd, all in
+   `go test` on macOS and Windows, the `install.ps1` ACL and wrapper
+   tests, and the hardened unit under real systemd on x86_64 and
+   arm64, all in
    `.github/workflows/validate.yml`) is the pre-push gate. `main`
    must stay releasable — `release.yml` builds the seven platform
    artifacts from green main. Operator-facing behavior changes update
@@ -132,9 +157,12 @@ candidates soak as a dev build (rule 8).
   activity log, update authority). Issue #6 hardening lives here too:
   `SecureBase` (http -> https except loopback; repair, never refuse),
   bounded door/update reads, and `installBinary` (exclusive random temp
-  file beside the binary, fsync, same-file check, atomic rename). A later
-  change adds fallback to the previous binary; keep it on top of
-  `installBinary`, not beside it.
+  file beside the binary, fsync, same-file check, atomic rename), with
+  the fallback on top of it in `fallback.go`: `installSteps.check`
+  runs the candidate's self-check, the previous binary is kept, and
+  `beforeSwap` writes the trial. `testdata/fakecollector` is a stand-in
+  release (prove / outage / crash / legacy) that `fallback_test.go` and
+  `scripts/test-systemd-unit.sh` build to crash and roll back for real.
 - `internal/envfile/` — `.env` loading. A group/world-readable file is
   tightened to owner-only at startup and logged (doctor loads without
   repairing and reports). Repair-and-warn, never refuse: a refusal would

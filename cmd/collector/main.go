@@ -66,6 +66,11 @@ func doorHTTP() *http.Client {
 	return &http.Client{Timeout: 30 * time.Second, CheckRedirect: crapi.RefuseDowngrade}
 }
 
+// trial is the unproven update this start may be (v2.Guard); nil when
+// there is none. Every deliberate exit goes through it, so a hub outage
+// or a missing token is never mistaken for a crash.
+var trial *v2.Trial
+
 // Exit code 2 means "this configuration will never work" — the
 // supervisor must stop rather than restart, because no number of
 // restarts conjures a token. run-forever.sh, the systemd unit and the
@@ -73,9 +78,11 @@ func doorHTTP() *http.Client {
 func required(name string) string {
 	v := os.Getenv(name)
 	if v == "" {
+		// The updater's self-check (v2.selfCheck) recognises a release
+		// older than `version` by this wording; keep it.
 		fmt.Fprintf(os.Stderr,
 			"missing required config: %s (set it in .env next to this binary, or in $ELIXIR_MCP_ENV_FILE)\n", name)
-		os.Exit(2)
+		trial.Exit(2)
 	}
 	return v
 }
@@ -108,6 +115,13 @@ func runDoctor(env envfile.Result, asJSON bool) {
 }
 
 func main() {
+	// `version` is the updater's self-check on a downloaded candidate
+	// (v2.selfCheck): first, before .env, the tokens or any network, so
+	// it proves only that this binary starts on this machine.
+	if len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "--version") {
+		fmt.Println(version)
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "doctor" {
 		asJSON := false
 		for _, a := range os.Args[2:] {
@@ -117,6 +131,9 @@ func main() {
 		}
 		runDoctor(loadEnv(false), asJSON)
 	}
+	// Before anything that could fail: a start of an unproven update is
+	// counted here, and rolled back after repeated crashes.
+	trial = v2.Guard(version, logJSON)
 	env := loadEnv(true)
 	if w := env.Warning(); w != "" {
 		logJSON("warn", w)
@@ -142,6 +159,8 @@ func main() {
 		Fetch:   fetcher.Fetch,
 		Log:     logJSON,
 		Now:     time.Now,
+		// Any answer from the hub proves an updated binary.
+		OnResponse: trial.Proven,
 		Sleep: func(d time.Duration) {
 			select {
 			case <-ctx.Done():
@@ -152,6 +171,7 @@ func main() {
 	logJSON("info", "gateway up (go, zero-trust v2) version="+version)
 	if err := client.Run(ctx); err != nil && ctx.Err() == nil {
 		logJSON("error", err.Error())
-		os.Exit(1)
+		trial.Exit(1)
 	}
+	trial.End()
 }

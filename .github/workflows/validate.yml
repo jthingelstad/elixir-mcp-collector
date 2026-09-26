@@ -17,6 +17,9 @@ jobs:
           go-version: "1.24"
       - run: gofmt -l . | tee /dev/stderr | (! read)
       - run: go vet ./...
+      # ./... skips testdata; the fake release the fallback tests build
+      # is vetted by name.
+      - run: go vet ./internal/v2/testdata/fakecollector
       - run: go test ./...
   shell:
     runs-on: ubuntu-latest
@@ -31,6 +34,9 @@ jobs:
       - run: SH=dash sh scripts/test-install.sh
   # The updater's Windows rename path and the macOS symlink handling
   # only run on those hosts (issue #6), so the Go tests run there too.
+  # So does the fallback's end-to-end test (internal/v2/fallback_test.go):
+  # real binaries crash, restart and roll back, which on Windows renames
+  # a running .exe aside.
   go-platforms:
     strategy:
       fail-fast: false
@@ -46,17 +52,26 @@ jobs:
       - run: go test ./...
   # install.ps1's user-only .env ACL, on a real Windows host, under both
   # Windows PowerShell 5.1 (what `irm | iex` usually runs in) and pwsh.
+  # Also the run-collector.cmd wrapper, which restores collector.exe from
+  # collector.exe.prev after a power cut mid-swap.
   windows-acl:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-install-acl.ps1
       - run: pwsh -NoProfile -File scripts/test-install-acl.ps1
+      - run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-install-wrapper.ps1
+      - run: pwsh -NoProfile -File scripts/test-install-wrapper.ps1
   # The hardened systemd unit under real systemd: it must start the
-  # collector, let it tighten .env and self-update in place, and stop on
-  # exit 2. Loopback only; no token, no hub.
+  # collector, let it tighten .env and self-update in place, roll back a
+  # release that crashes at startup, and stop on exit 2. Loopback only;
+  # no token, no hub. On x86_64 and arm64 (the Pi and ARM-VM fleet).
   systemd:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7

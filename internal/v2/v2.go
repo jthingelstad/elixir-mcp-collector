@@ -82,6 +82,11 @@ type Client struct {
 	Log     func(level, msg string)
 	Now     func() time.Time
 	Sleep   func(d time.Duration)
+	// OnResponse runs on every door response, any status, any body: the
+	// proof an updated binary works (Trial.Proven). Optional.
+	OnResponse func()
+	// Bin is the binary self-update replaces; "" is os.Executable().
+	Bin string
 
 	cfg              Config
 	brk              *breaker.Breaker
@@ -183,6 +188,9 @@ func (c *Client) callWithHTTP(client *http.Client, method, route string, body an
 	// large or malformed to use - is progress: the process is not
 	// wedged, so the watchdog must not restart it (AGENTS.md rule 6).
 	c.lastProgress = c.Now()
+	if c.OnResponse != nil {
+		c.OnResponse()
+	}
 	if len(data) > maxDoorBytes && out != nil {
 		return res.StatusCode, fmt.Errorf("%s %s: response over %d bytes", method, route, maxDoorBytes)
 	}
@@ -261,21 +269,50 @@ func (c *Client) LoadConfig(selfUpdate bool) error {
 		c.cfg.Gateway.Channel, c.cfg.PacingMS, c.cfg.Gateway.Status))
 	if selfUpdate && c.Version != "dev" {
 		key := fmt.Sprintf("go-%s-%s", runtime.GOOS, runtime.GOARCH)
-		if rel, ok := c.cfg.Update[key]; ok && rel.Version != c.Version {
-			c.Log("info", "update authority names "+rel.Version+"; self-updating")
-			if err := c.applyUpdate(rel.URL, rel.Sha256); err != nil {
-				// An update failure never stops collection.
-				c.Log("warn", "self-update failed: "+err.Error())
-			} else {
-				c.Log("info", "updated; exiting for supervisor restart")
-				os.Exit(0)
-			}
+		if rel, ok := c.cfg.Update[key]; ok {
+			c.updateTo(rel.Version, rel.URL, rel.Sha256)
 		}
 	}
 	return nil
 }
 
-func (c *Client) applyUpdate(url, wantSha string) error {
+// updateTo applies the update authority's answer for this platform. The
+// one exception to "install what the hub names" is a version that
+// crashed before reaching the hub on this machine and was rolled back
+// (fallback.go): it is refused until the hub names any other version,
+// and said so loudly every time. That is not a pin - it holds no version
+// the hub did not name, and the hub moving on clears it.
+func (c *Client) updateTo(version, url, sha string) {
+	self, err := c.binary()
+	if err != nil {
+		c.Log("warn", "self-update failed: "+err.Error())
+		return
+	}
+	if refused := readRefusal(self); refused != "" {
+		if version == refused {
+			if version != c.Version {
+				c.Log("error", fmt.Sprintf("REFUSING update to %s: it crashed before reaching the hub on this machine and was rolled back. Waiting for the hub to name a different version (delete %s to retry this one).",
+					version, filepath.Base(self+refusedSuffix)))
+			}
+			return
+		}
+		_ = os.Remove(self + refusedSuffix)
+		c.Log("info", fmt.Sprintf("the hub now names %s; no longer refusing %s", version, refused))
+	}
+	if version == c.Version {
+		return
+	}
+	c.Log("info", "update authority names "+version+"; self-updating")
+	if err := c.applyUpdate(url, sha, version); err != nil {
+		// An update failure never stops collection.
+		c.Log("warn", "self-update failed: "+err.Error())
+		return
+	}
+	c.Log("info", "updated; exiting for supervisor restart")
+	os.Exit(0)
+}
+
+func (c *Client) applyUpdate(url, wantSha, version string) error {
 	res, err := c.HTTP.Get(url)
 	if err != nil {
 		return err
@@ -298,29 +335,67 @@ func (c *Client) applyUpdate(url, wantSha string) error {
 	if hex.EncodeToString(sum[:]) != wantSha {
 		return fmt.Errorf("sha256 mismatch: server named %s", wantSha)
 	}
-	self, err := os.Executable()
+	self, err := c.binary()
 	if err != nil {
 		return err
 	}
-	return installBinary(self, data)
+	trial := self + trialSuffix
+	err = installBinary(self, data, installSteps{
+		check: func(staged string) error {
+			legacy, err := selfCheck(staged, version)
+			if err == nil && legacy {
+				c.Log("info", version+" predates the self-check: it runs here and stops at its token check, but cannot report its version")
+			}
+			return err
+		},
+		beforeSwap: func() error {
+			return writeJSON(trial, trialState{From: c.Version, To: version, Since: c.Now().UTC()})
+		},
+	})
+	if err != nil {
+		_ = os.Remove(trial)
+	}
+	return err
+}
+
+// binary is the path of the running binary's real file (Bin in tests).
+func (c *Client) binary() (string, error) {
+	self := c.Bin
+	if self == "" {
+		var err error
+		if self, err = os.Executable(); err != nil {
+			return "", err
+		}
+	}
+	return realPath(self), nil
 }
 
 // renameFile is os.Rename; tests swap it to interrupt an install.
 var renameFile = os.Rename
 
+// installSteps are what an update adds to installBinary's swap.
+type installSteps struct {
+	// check runs the staged candidate before anything at self changes;
+	// an error leaves self exactly as it was (fallback.go, layer 1).
+	check func(staged string) error
+	// beforeSwap runs once the previous binary is kept and just before
+	// the rename that swaps in the candidate: the trial state is written
+	// here, so a trial always has its previous binary beside it.
+	beforeSwap func() error
+}
+
 // installBinary puts data in place of the binary at self (issue #6).
 // The new file is created exclusively under a random name in the target
 // directory (never a predictable path a symlink could be planted on),
-// written, fsynced and checked, then renamed over the target in one
-// step; the directory is fsynced so the rename survives a power cut. On
-// any failure the temp file is removed and the running binary is
-// untouched.
-func installBinary(self string, data []byte) (err error) {
+// written, fsynced and checked, run through steps.check, then renamed
+// over the target in one step; the directory is fsynced so the rename
+// survives a power cut. The binary it replaces is kept at self+".prev"
+// until the new one is proven. On any failure the temp file is removed
+// and the running binary is untouched.
+func installBinary(self string, data []byte, steps installSteps) (err error) {
 	// Update the file itself, not a symlink to it: on macOS
 	// os.Executable can return the link the binary was started through.
-	if real, err := filepath.EvalSymlinks(self); err == nil {
-		self = real
-	}
+	self = realPath(self)
 	st, err := os.Lstat(self)
 	if err != nil {
 		return err
@@ -329,7 +404,13 @@ func installBinary(self string, data []byte) (err error) {
 		return fmt.Errorf("%s is not a regular file", self)
 	}
 	dir := filepath.Dir(self)
-	f, err := os.CreateTemp(dir, ".collector-update-*")
+	// Windows only runs a file whose name ends in .exe; the check execs
+	// the staged file before it has its final name.
+	suffix := ""
+	if runtime.GOOS == "windows" {
+		suffix = ".exe"
+	}
+	f, err := os.CreateTemp(dir, ".collector-update-*"+suffix)
 	if err != nil {
 		return err
 	}
@@ -346,13 +427,9 @@ func installBinary(self string, data []byte) (err error) {
 	if err = f.Chmod(0o755); err != nil {
 		return err
 	}
-	// A filesystem that cannot fsync (some FUSE and SMB mounts on NAS
-	// boxes) must not strand this collector on an old version forever:
-	// durability is lost there, the update is not.
-	if err = f.Sync(); err != nil && !errors.Is(err, errors.ErrUnsupported) && !errors.Is(err, syscall.EINVAL) {
+	if err = syncFile(f); err != nil {
 		return err
 	}
-	err = nil
 	// The path must still name the file we wrote: if something replaced
 	// it since CreateTemp, renaming it into place would install that.
 	written, err := f.Stat()
@@ -369,27 +446,69 @@ func installBinary(self string, data []byte) (err error) {
 	if !now.Mode().IsRegular() || !os.SameFile(written, now) {
 		return fmt.Errorf("%s changed while the update was written", tmp)
 	}
+	if steps.check != nil {
+		if err = steps.check(tmp); err != nil {
+			return fmt.Errorf("the new binary failed its self-check: %w", err)
+		}
+	}
 
+	prev := self + prevSuffix
 	if runtime.GOOS == "windows" {
 		// Windows locks a running .exe: it cannot be overwritten, but it
-		// CAN be renamed aside. Move self out of the way, then rename the
-		// verified file into its place; the supervisor restarts into it.
-		// A prior ".old" is cleaned at startup.
-		backup := self + ".old"
-		_ = os.Remove(backup)
-		if err = renameFile(self, backup); err != nil {
+		// CAN be renamed aside. Move self out of the way (it is the
+		// previous binary from here on), then rename the checked file
+		// into its place; the supervisor restarts into it. The instant
+		// between the two renames is covered by run-collector.cmd.
+		_ = os.Remove(prev)
+		if steps.beforeSwap != nil {
+			if err = steps.beforeSwap(); err != nil {
+				return err
+			}
+		}
+		if err = renameFile(self, prev); err != nil {
 			return err
 		}
-		if err = renameFile(tmp, self); err != nil {
-			_ = renameFile(backup, self) // roll back
+		// A virus scanner can hold the file the check just ran for a
+		// moment after it exits.
+		for i := 0; ; i++ {
+			if err = renameFile(tmp, self); err == nil || i == 10 {
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		if err != nil {
+			_ = renameFile(prev, self) // roll back
 			return err
 		}
 		return nil
 	}
+	// Unix: self is never absent, not for an instant. The previous
+	// binary is linked (or copied) aside first; the rename then swaps
+	// the path from one complete binary to the other.
+	if err = keepPrevious(self, prev); err != nil {
+		return fmt.Errorf("keeping the previous binary: %w", err)
+	}
+	if steps.beforeSwap != nil {
+		if err = steps.beforeSwap(); err != nil {
+			_ = os.Remove(prev)
+			return err
+		}
+	}
 	if err = renameFile(tmp, self); err != nil {
+		_ = os.Remove(prev)
 		return err
 	}
 	syncDir(dir)
+	return nil
+}
+
+// syncFile is f.Sync, except that a filesystem that cannot fsync (some
+// FUSE and SMB mounts on NAS boxes) must not strand this collector on an
+// old version forever: durability is lost there, the update is not.
+func syncFile(f *os.File) error {
+	if err := f.Sync(); err != nil && !errors.Is(err, errors.ErrUnsupported) && !errors.Is(err, syscall.EINVAL) {
+		return err
+	}
 	return nil
 }
 
@@ -573,6 +692,8 @@ func (c *Client) Run(ctx context.Context) error {
 		return err
 	}
 	if runtime.GOOS == "windows" {
+		// Left by updaters older than the fallback, which kept the
+		// replaced .exe as .old; today it is .prev (fallback.go).
 		if self, err := os.Executable(); err == nil {
 			_ = os.Remove(self + ".old")
 		}

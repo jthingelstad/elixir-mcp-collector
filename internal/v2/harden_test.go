@@ -200,7 +200,7 @@ func leftovers(t *testing.T, dir string) []string {
 
 func TestInstallBinaryReplacesAtomically(t *testing.T) {
 	dir, self := target(t)
-	if err := installBinary(self, []byte("new binary")); err != nil {
+	if err := installBinary(self, []byte("new binary"), installSteps{}); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(self)
@@ -233,7 +233,7 @@ func TestInstallBinaryIgnoresAPlantedSymlink(t *testing.T) {
 	if err := os.Symlink(victim, filepath.Join(dir, ".collector-update")); err != nil {
 		t.Fatal(err)
 	}
-	if err := installBinary(self, []byte("new binary")); err != nil {
+	if err := installBinary(self, []byte("new binary"), installSteps{}); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := os.ReadFile(victim); string(got) != "do not touch" {
@@ -255,7 +255,7 @@ func TestInstallBinaryUpdatesThroughALink(t *testing.T) {
 	if err := os.Symlink(self, link); err != nil {
 		t.Fatal(err)
 	}
-	if err := installBinary(link, []byte("new binary")); err != nil {
+	if err := installBinary(link, []byte("new binary"), installSteps{}); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := os.ReadFile(self); string(got) != "new binary" {
@@ -275,7 +275,7 @@ func TestInstallBinaryRefusesANonRegularTarget(t *testing.T) {
 	if err := os.Mkdir(self, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := installBinary(self, []byte("new")); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+	if err := installBinary(self, []byte("new"), installSteps{}); err == nil || !strings.Contains(err.Error(), "not a regular file") {
 		t.Fatalf("got %v", err)
 	}
 	if l := leftovers(t, dir); len(l) != 0 {
@@ -289,7 +289,7 @@ func TestInterruptedInstallLeavesTheOldBinary(t *testing.T) {
 	dir, self := target(t)
 	renameFile = func(string, string) error { return errors.New("power cut") }
 	defer func() { renameFile = os.Rename }()
-	if err := installBinary(self, []byte("new binary")); err == nil {
+	if err := installBinary(self, []byte("new binary"), installSteps{}); err == nil {
 		t.Fatal("expected the interruption to surface")
 	}
 	if got, _ := os.ReadFile(self); string(got) != "old binary" {
@@ -308,7 +308,7 @@ func TestOversizedUpdateIsRefused(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := testClient(srv.URL, nil)
-	if err := c.applyUpdate(srv.URL+"/bin", "00"); err == nil || !strings.Contains(err.Error(), "download over") {
+	if err := c.applyUpdate(srv.URL+"/bin", "00", "v9"); err == nil || !strings.Contains(err.Error(), "download over") {
 		t.Fatalf("got %v", err)
 	}
 }
