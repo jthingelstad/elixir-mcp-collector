@@ -154,6 +154,9 @@ type refusal struct {
 	Version string    `json:"version"`
 	Instead string    `json:"rolled_back_to"`
 	At      time.Time `json:"at"`
+	// A .trial renamed into place when no new file could be written
+	// (rollBack) names the version here instead.
+	To string `json:"to"`
 }
 
 // realPath is the file behind self: os.Executable can return the link a
@@ -185,7 +188,7 @@ func writeJSON(path string, v any) (err error) {
 		return err
 	}
 	dir := filepath.Dir(path)
-	f, err := os.CreateTemp(dir, ".collector-state-*")
+	f, err := createTemp(dir, ".collector-state-*")
 	if err != nil {
 		return err
 	}
@@ -218,7 +221,10 @@ func readRefusal(self string) string {
 	if ok, err := readJSON(self+refusedSuffix, &r); !ok || err != nil {
 		return ""
 	}
-	return r.Version
+	if r.Version != "" {
+		return r.Version
+	}
+	return r.To
 }
 
 // Trial is one start of an unproven update. A nil *Trial (no update in
@@ -372,10 +378,17 @@ func rollBack(self string, st trialState, log func(level, msg string)) {
 		_ = os.Remove(self + trialSuffix)
 		return
 	}
-	// Refuse first: if the restore is cut short, the old binary must
-	// not reinstall this version the moment it starts.
+	// Refuse first: the restored binary checks the hub at startup, and
+	// without the refusal it would reinstall this version at once - a
+	// tight install/crash/rollback loop. A full disk (the likeliest
+	// failure with two binaries on it) cannot take a new file, but the
+	// trial state already names the version, and a rename needs no space.
 	if err := writeJSON(self+refusedSuffix, refusal{Version: st.To, Instead: st.From, At: time.Now().UTC()}); err != nil {
-		log("warn", "cannot record the refusal: "+err.Error())
+		if err2 := renameFile(self+trialSuffix, self+refusedSuffix); err2 != nil {
+			log("error", fmt.Sprintf("update to %s keeps crashing before it reaches the hub, but the refusal cannot be recorded (%v; %v). Not rolling back, because %s would reinstall it at once; retrying at the next start.",
+				st.To, err, err2, st.From))
+			return
+		}
 	}
 	if err := restorePrevious(self, prev); err != nil {
 		log("error", fmt.Sprintf("update to %s keeps crashing before it reaches the hub; rolling back to %s FAILED: %v", st.To, st.From, err))
@@ -421,6 +434,10 @@ func keepPrevious(self, prev string) error {
 	}
 	return copyFile(self, prev)
 }
+
+// createTemp is os.CreateTemp for state files; tests swap it to fill
+// the disk.
+var createTemp = os.CreateTemp
 
 // linkFile is os.Link; tests swap it to exercise the copy.
 var linkFile = os.Link

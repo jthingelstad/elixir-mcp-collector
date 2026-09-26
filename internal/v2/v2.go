@@ -283,6 +283,13 @@ func (c *Client) LoadConfig(selfUpdate bool) error {
 // and said so loudly every time. That is not a pin - it holds no version
 // the hub did not name, and the hub moving on clears it.
 func (c *Client) updateTo(version, url, sha string) {
+	if version == "" {
+		// An update entry without a version names nothing: it must not
+		// clear a refusal, and there is nothing to install (rule 2: a
+		// dropped field decodes to its zero value).
+		c.Log("warn", "update authority entry for this platform names no version; ignoring it")
+		return
+	}
 	self, err := c.binary()
 	if err != nil {
 		c.Log("warn", "self-update failed: "+err.Error())

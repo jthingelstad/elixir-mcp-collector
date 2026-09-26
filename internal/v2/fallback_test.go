@@ -567,3 +567,64 @@ func TestEndToEndOutageThenProof(t *testing.T) {
 		t.Fatal("the proven binary is gone")
 	}
 }
+
+// An update entry whose version the hub dropped names nothing: the
+// refusal stands, and nothing is downloaded.
+func TestAnEmptyNamedVersionKeepsTheRefusal(t *testing.T) {
+	self := refusedAt(t, "v2.0.2")
+	srv, hits, sha := releaseServer(t, []byte("bad"))
+	var logs []string
+	updater(t, self, "v2.0.1", &logs).updateTo("", srv.URL, sha)
+	if readRefusal(self) != "v2.0.2" {
+		t.Fatal("an empty version cleared the refusal")
+	}
+	if *hits != 0 {
+		t.Fatal("an empty version was downloaded")
+	}
+}
+
+// crashTo leaves a trial that has crashed maxTrialCrashes times.
+func crashTo(t *testing.T) (self string, logs *[]string) {
+	t.Helper()
+	self = trialAt(t)
+	logs = new([]string)
+	for i := 0; i < maxTrialCrashes; i++ {
+		guard(self, "v2.0.2", logf(logs), noExit(t))
+	}
+	return self, logs
+}
+
+// A full disk cannot take the refusal file, but the rollback must not
+// go ahead without one: the trial state is renamed into its place.
+func TestRollbackOnAFullDiskStillRefuses(t *testing.T) {
+	self, logs := crashTo(t)
+	createTemp = func(string, string) (*os.File, error) { return nil, errors.New("no space left on device") }
+	defer func() { createTemp = os.CreateTemp }()
+	guard(self, "v2.0.2", logf(logs), func(int) {})
+	if !fileIs(t, self, []byte("old binary")) {
+		t.Fatal("the previous binary was not restored")
+	}
+	if got := readRefusal(self); got != "v2.0.2" {
+		t.Fatalf("refused %q after a full-disk rollback", got)
+	}
+}
+
+// With no way at all to record the refusal, the rollback waits: a
+// restored binary would reinstall the crashing version at once.
+func TestRollbackWaitsWhenNoRefusalCanBeRecorded(t *testing.T) {
+	self, logs := crashTo(t)
+	createTemp = func(string, string) (*os.File, error) { return nil, errors.New("no space left on device") }
+	renameFile = func(string, string) error { return errors.New("read-only file system") }
+	defer func() { createTemp, renameFile = os.CreateTemp, os.Rename }()
+	exited := -1
+	guard(self, "v2.0.2", logf(logs), func(code int) { exited = code })
+	if exited != 1 {
+		t.Fatalf("exit %d", exited)
+	}
+	if !fileIs(t, self, []byte("new binary")) || !exists(self+prevSuffix) || !exists(self+trialSuffix) {
+		t.Fatal("rolled back without a refusal, or lost the state to retry with")
+	}
+	if !strings.Contains(joined(*logs), "Not rolling back") {
+		t.Fatalf("%s", joined(*logs))
+	}
+}
