@@ -116,7 +116,9 @@ candidates soak as a dev build (rule 8).
 
 9. Work lands on `main`; CI (`gofmt`, `go vet`, `go test`, and the
    `run-forever.sh` and `install.sh` shell tests under `sh` and `dash`,
-   all in `.github/workflows/validate.yml`) is the pre-push gate. `main`
+   `go test` on macOS and Windows, the `install.ps1` ACL test, and the
+   hardened unit under real systemd, all in
+   `.github/workflows/validate.yml`) is the pre-push gate. `main`
    must stay releasable — `release.yml` builds the seven platform
    artifacts from green main. Operator-facing behavior changes update
    `README.md` in the same commit.
@@ -127,7 +129,16 @@ candidates soak as a dev build (rule 8).
   `ELIXIR_API_TOKEN`; missing either is exit 2. The module has ZERO
   third-party dependencies (stdlib only) since the SQS path went.
 - `internal/v2/` — the zero-trust client (config/lease/submit, watchdog,
-  activity log, update authority).
+  activity log, update authority). Issue #6 hardening lives here too:
+  `SecureBase` (http -> https except loopback; repair, never refuse),
+  bounded door/update reads, and `installBinary` (exclusive random temp
+  file beside the binary, fsync, same-file check, atomic rename). A later
+  change adds fallback to the previous binary; keep it on top of
+  `installBinary`, not beside it.
+- `internal/envfile/` — `.env` loading. A group/world-readable file is
+  tightened to owner-only at startup and logged (doctor loads without
+  repairing and reports). Repair-and-warn, never refuse: a refusal would
+  stop a collector that ran fine before an automatic update.
 - `internal/doctor/` — the operator preflight (`collector doctor
   [--json]`). Five read-only checks, all of which run; exit 0 healthy /
   1 broken / 2 valid-but-not-yet-active; secrets shown as their last
@@ -149,13 +160,22 @@ candidates soak as a dev build (rule 8).
   collector that ignores the filter is correct, only wasteful - which is
   why the field is optional on both sides.
 - `internal/crapi`, `internal/breaker` — CR API paths + the 403 breaker
-  (shared helpers). `internal/worker` (SQS envelopes) and
+  (shared helpers). `crapi.Fetch` reads at most `MaxBodyBytes`+1 (after
+  gzip decoding) and marks a bigger body `TooLarge`, which v2 submits as
+  an overflow; `crapi.RefuseDowngrade` is the redirect policy for every
+  client that carries a bearer. `internal/worker` (SQS envelopes) and
   `internal/update` (GitHub-polling updater) were DELETED 2026-09-06
   with the transport they served; do not reintroduce either.
 - `scripts/install.sh` — one-command install for macOS/Linux (download
   binary + supervise via launchd/systemd). `scripts/install.ps1` — the
   Windows equivalent (download .exe + register a Scheduled Task).
-  `scripts/elixir-collector.service` (systemd unit),
+  `scripts/elixir-collector.service` (systemd unit, sandboxed; its
+  `ReadWritePaths` must be the collector dir or self-update fails, and
+  the header documents the `elixir-collector@.service` / `%i` form some
+  operators run; `scripts/test-systemd-unit.sh` runs it under real
+  systemd in CI, installed as a template), `install.sh` tightens a loose
+  `.env`, `install.ps1` sets a user-only ACL between `# BEGIN env-acl`
+  markers that `scripts/test-install-acl.ps1` runs on windows-latest,
   `scripts/run-forever.sh` (generic POSIX KeepAlive loop for DSM and
   other hosts without a supervisor; finds the binary in its own dir,
   its parent, or `$PWD`, and exits with a message rather than
@@ -175,6 +195,9 @@ candidates soak as a dev build (rule 8).
   DigitalOcean page - its Reserved IP is an alias with ambiguous
   egress. When the installer or the unit changes, the YAML changes in
   the same commit.
+- `docs/THREAT-MODEL.md` — what the collector guarantees on the host
+  itself vs what each platform's supervisor provides. Keep its tables
+  true when the unit, the installers or the client change.
 - `docs/GO-PORT.md` — design history (parts superseded by the zero-trust
   transition; see its postscript).
 

@@ -9,7 +9,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -17,12 +16,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"syscall"
 	"time"
 
 	"github.com/jthingelstad/elixir-mcp-collector/internal/crapi"
 	"github.com/jthingelstad/elixir-mcp-collector/internal/doctor"
+	"github.com/jthingelstad/elixir-mcp-collector/internal/envfile"
 	"github.com/jthingelstad/elixir-mcp-collector/internal/v2"
 )
 
@@ -37,12 +36,10 @@ func logJSON(level, msg string) {
 	fmt.Fprintln(os.Stderr, string(line))
 }
 
-var envLine = regexp.MustCompile(`^([A-Z0-9_]+)=(.*)$`)
-
 // loadEnv reads .env beside the binary (or $ELIXIR_MCP_ENV_FILE) into the
-// environment; returns where it looked and whether it found the file, for
-// doctor to report.
-func loadEnv() (string, bool) {
+// environment. With repair, a group- or world-readable file is tightened
+// to owner-only (issue #6); doctor passes false and only reports.
+func loadEnv(repair bool) envfile.Result {
 	envFile := os.Getenv("ELIXIR_MCP_ENV_FILE")
 	if envFile == "" {
 		self, err := os.Executable()
@@ -50,20 +47,23 @@ func loadEnv() (string, bool) {
 			envFile = filepath.Join(filepath.Dir(self), ".env")
 		}
 	}
-	f, err := os.Open(envFile)
-	if err != nil {
-		return envFile, false // env-only
+	return envfile.Load(envFile, repair)
+}
+
+// apiBase is ELIXIR_API_BASE (or the hub), made safe to send the bearer
+// to: see v2.SecureBase. note is "" when there is nothing to say.
+func apiBase() (base, note string) {
+	raw := os.Getenv("ELIXIR_API_BASE")
+	if raw == "" {
+		raw = "https://elixir.poapkings.com/api/collector"
 	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		if m := envLine.FindStringSubmatch(sc.Text()); m != nil {
-			if os.Getenv(m[1]) == "" {
-				os.Setenv(m[1], m[2])
-			}
-		}
-	}
-	return envFile, true
+	return v2.SecureBase(raw)
+}
+
+// doorHTTP is the client for the door and the update download: it
+// follows redirects, but never from https down to http.
+func doorHTTP() *http.Client {
+	return &http.Client{Timeout: 30 * time.Second, CheckRedirect: crapi.RefuseDowngrade}
 }
 
 // Exit code 2 means "this configuration will never work" — the
@@ -82,22 +82,20 @@ func required(name string) string {
 
 // runDoctor is the read-only preflight (`collector doctor [--json]`): it
 // never leases, and a missing token is a finding here, not exit 2.
-func runDoctor(envPath string, envFound bool, asJSON bool) {
-	base := os.Getenv("ELIXIR_API_BASE")
-	if base == "" {
-		base = "https://elixir.poapkings.com/api/collector"
-	}
+func runDoctor(env envfile.Result, asJSON bool) {
+	base, baseNote := apiBase()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	crToken := os.Getenv("CR_API_TOKEN")
 	report := doctor.Run(ctx, doctor.Options{
 		Version:  version,
-		EnvPath:  envPath,
-		EnvFound: envFound,
+		EnvPath:  env.Path,
+		EnvFound: env.Found,
 		CRToken:  crToken,
 		APIToken: os.Getenv("ELIXIR_API_TOKEN"),
 		Base:     base,
-		HTTP:     &http.Client{Timeout: 30 * time.Second},
+		BaseNote: baseNote,
+		HTTP:     doorHTTP(),
 		Fetch:    crapi.New(crToken, version).Fetch,
 	})
 	if asJSON {
@@ -110,7 +108,6 @@ func runDoctor(envPath string, envFound bool, asJSON bool) {
 }
 
 func main() {
-	envPath, envFound := loadEnv()
 	if len(os.Args) > 1 && os.Args[1] == "doctor" {
 		asJSON := false
 		for _, a := range os.Args[2:] {
@@ -118,14 +115,18 @@ func main() {
 				asJSON = true
 			}
 		}
-		runDoctor(envPath, envFound, asJSON)
+		runDoctor(loadEnv(false), asJSON)
+	}
+	env := loadEnv(true)
+	if w := env.Warning(); w != "" {
+		logJSON("warn", w)
 	}
 	crToken := required("CR_API_TOKEN")
 	apiToken := required("ELIXIR_API_TOKEN")
 
-	base := os.Getenv("ELIXIR_API_BASE")
-	if base == "" {
-		base = "https://elixir.poapkings.com/api/collector"
+	base, baseNote := apiBase()
+	if baseNote != "" {
+		logJSON("warn", baseNote)
 	}
 
 	ctx, cancel := signal.NotifyContext(
@@ -137,7 +138,7 @@ func main() {
 		Base:    base,
 		Token:   apiToken,
 		Version: version,
-		HTTP:    &http.Client{Timeout: 30 * time.Second},
+		HTTP:    doorHTTP(),
 		Fetch:   fetcher.Fetch,
 		Log:     logJSON,
 		Now:     time.Now,

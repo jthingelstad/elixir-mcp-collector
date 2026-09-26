@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -182,6 +185,53 @@ func TestClockSkewIsAWarning(t *testing.T) {
 	o.Now = func() time.Time { return time.Now().Add(10 * time.Minute) }
 	r := Run(context.Background(), o)
 	if r.Exit != ExitHealthy || !strings.Contains(Text(r), "fix NTP") {
+		t.Fatalf("\n%s", Text(r))
+	}
+}
+
+// Issue #6: a loose .env is a warning with the fix, never a failure, and
+// doctor leaves the mode alone (it reports; the collector repairs).
+func TestLooseEnvIsAWarningDoctorDoesNotChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX modes")
+	}
+	p := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(p, []byte("X=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chmod(p, 0o644)
+	d := door(t, 200, healthyBody())
+	defer d.Close()
+	o := opts(t, d.URL, ok200)
+	o.EnvPath, o.EnvFound = p, true
+	r := Run(context.Background(), o)
+	txt := Text(r)
+	if r.Exit != ExitHealthy || !r.Checks[1].Warn {
+		t.Fatalf("a loose .env warns, it does not fail:\n%s", txt)
+	}
+	for _, want := range []string{"(mode 644)", "readable by other accounts", "fix: chmod 600 " + p} {
+		if !strings.Contains(txt, want) {
+			t.Errorf("text lacks %q:\n%s", want, txt)
+		}
+	}
+	if st, _ := os.Stat(p); st.Mode().Perm() != 0o644 {
+		t.Fatalf("doctor changed the mode to %o", st.Mode().Perm())
+	}
+}
+
+// Issue #6: what SecureBase said about ELIXIR_API_BASE shows under the
+// elixir check as a warning; the check itself still runs against the
+// base the collector will really use.
+func TestBaseNoteIsAWarningOnTheElixirCheck(t *testing.T) {
+	d := door(t, 200, healthyBody())
+	defer d.Close()
+	o := opts(t, d.URL, ok200)
+	o.BaseNote = "ELIXIR_API_BASE is plain http to a loopback address - development only"
+	r := Run(context.Background(), o)
+	if r.Exit != ExitHealthy || !r.Checks[2].OK || !r.Checks[2].Warn {
+		t.Fatalf("\n%s", Text(r))
+	}
+	if !strings.Contains(Text(r), "! elixir") || !strings.Contains(Text(r), "development only") {
 		t.Fatalf("\n%s", Text(r))
 	}
 }

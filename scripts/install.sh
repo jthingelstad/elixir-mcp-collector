@@ -15,6 +15,20 @@ REPO="jthingelstad/elixir-mcp-collector"
 DIR="$(pwd)"
 [ -f "$DIR/.env" ] || { echo "No .env here. Copy .env.example to .env and fill in CR_API_TOKEN + ELIXIR_API_TOKEN first."; exit 1; }
 
+# .env holds two secrets, so it is owner-only. Repair a looser mode
+# rather than refuse (issue #6); the collector itself does the same at
+# every startup, and `collector doctor` reports it. `ls -ln` is the
+# portable way to read a mode across GNU, BSD/macOS and BusyBox:
+# characters 5-10 are the group and other bits.
+env_perms="$(ls -ln "$DIR/.env" | cut -c5-10)"
+if [ "$env_perms" != "------" ]; then
+  if chmod go-rwx "$DIR/.env" 2>/dev/null; then
+    echo "Tightened .env to owner-only (it was readable by other accounts on this machine)."
+  else
+    echo "WARNING: .env is readable by other accounts and could not be tightened. Run: chmod 600 $DIR/.env"
+  fi
+fi
+
 os="$(uname -s)"; arch="$(uname -m)"
 case "$os-$arch" in
   Darwin-arm64)  asset=collector_darwin_arm64 ;;   # Apple Silicon
@@ -93,7 +107,8 @@ PL
   launchctl load "$PLIST"
   echo "Installed + started. Logs: ~/Library/Logs/elixir-mcp-collector.log"
 else
-  echo "Binary at $DIR/collector. To supervise with systemd, edit and install scripts/elixir-collector.service,"
+  echo "Binary at $DIR/collector. To supervise with systemd, edit and install scripts/elixir-collector.service"
+  echo "(hardened: its ReadWritePaths must name $DIR so self-update can replace the binary),"
   echo "or run under any supervisor: ELIXIR_MCP_ENV_FILE=$DIR/.env $DIR/collector"
   echo "(scripts/run-forever.sh is a plain KeepAlive loop for hosts without a supervisor.)"
 fi

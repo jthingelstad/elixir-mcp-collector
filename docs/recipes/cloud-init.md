@@ -9,8 +9,9 @@ The file is [`cloud-init.yaml`](cloud-init.yaml). Read it once; it is
 short. It creates an unprivileged `collector` user, writes your two
 secrets to `/opt/elixir-collector/.env` at mode 600, installs the
 collector binary with the repository's own installer (SHA-256-verified
-against the release), installs a hardened systemd unit, starts it, and
-runs `collector doctor` so the cloud-init log ends with a verdict.
+against the release), installs a hardened systemd unit (the same
+sandbox as `scripts/elixir-collector.service`), starts it, and runs
+`collector doctor` so the cloud-init log ends with a verdict.
 
 ## Steps
 

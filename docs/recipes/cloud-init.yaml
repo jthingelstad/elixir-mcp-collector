@@ -50,15 +50,35 @@ write_files:
       Restart=always
       RestartSec=5
       RestartPreventExitStatus=2
-      # Hardening. The collector holds two secrets and talks to three
-      # HTTPS endpoints; it needs nothing else on the box. Its own
-      # directory stays writable because self-update swaps the binary
-      # in place.
+      # Hardening, the same set as scripts/elixir-collector.service
+      # (which explains each line). The collector holds two secrets and
+      # talks to three HTTPS hosts; it needs nothing else on the box.
+      # Its own directory stays writable because self-update swaps the
+      # binary in place.
       NoNewPrivileges=true
+      UMask=0077
       ProtectSystem=strict
       ProtectHome=true
-      PrivateTmp=true
       ReadWritePaths=/opt/elixir-collector
+      PrivateTmp=true
+      PrivateDevices=true
+      ProtectKernelTunables=true
+      ProtectKernelModules=true
+      ProtectKernelLogs=true
+      ProtectControlGroups=true
+      ProtectClock=true
+      ProtectHostname=true
+      ProtectProc=invisible
+      CapabilityBoundingSet=
+      AmbientCapabilities=
+      RestrictSUIDSGID=true
+      RestrictNamespaces=true
+      RestrictRealtime=true
+      RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+      LockPersonality=true
+      MemoryDenyWriteExecute=true
+      SystemCallFilter=@system-service
+      SystemCallErrorNumber=EPERM
 
       [Install]
       WantedBy=multi-user.target

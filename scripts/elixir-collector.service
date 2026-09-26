@@ -1,13 +1,22 @@
 # systemd unit template for Linux hosts (the launchd equivalent).
 # Install:
 #   sudo cp scripts/elixir-collector.service /etc/systemd/system/
-#   edit User=, WorkingDirectory= and ExecStart= below, then:
+#   edit User= and the three /CHANGE_ME paths below, then:
 #   sudo systemctl enable --now elixir-collector
 #
 # WorkingDirectory is the folder holding the collector binary and its
 # .env (what scripts/install.sh drops them into); ExecStart must be the
-# absolute path to that same binary. The collector reads .env from its
-# own directory, or from $ELIXIR_MCP_ENV_FILE if you set one below.
+# absolute path to that same binary, and ReadWritePaths that same folder.
+# The collector reads .env from its own directory, or from
+# $ELIXIR_MCP_ENV_FILE if you set one below.
+#
+# Several collectors, one directory each? Save this as
+# /etc/systemd/system/elixir-collector@.service, use %i for the
+# directory name in all three paths (for example
+# WorkingDirectory=/opt/elixir-collector/%i,
+# ExecStart=/opt/elixir-collector/%i/collector,
+# ReadWritePaths=/opt/elixir-collector/%i), and start each with
+# `sudo systemctl enable --now elixir-collector@<name>`.
 #
 # Restart=always reproduces launchd KeepAlive: the worker exits after a
 # successful self-update and systemd brings it back on the new code.
@@ -28,6 +37,45 @@ RestartSec=2
 # ELIXIR_API_TOKEN). Restarting cannot fix it, so stop and let the
 # operator read the failure instead of spinning on it.
 RestartPreventExitStatus=2
+
+# Hardening. The collector holds two secrets and talks HTTPS to three
+# hosts; it needs nothing else on the box. The whole filesystem is
+# read-only to it except its own directory, which must stay writable:
+# self-update writes the new binary there and renames it into place,
+# and the collector tightens a loose .env there. Directives an older
+# systemd does not know are logged and ignored, never fatal.
+NoNewPrivileges=true
+UMask=0077
+ProtectSystem=strict
+# read-only rather than true, so a collector directory under /home
+# still works: ReadWritePaths re-opens it for writing.
+ProtectHome=read-only
+ReadWritePaths=/CHANGE_ME/elixir-mcp-collector
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+# No capabilities, no privilege changes, no new namespaces. Sockets are
+# IPv4/IPv6 for HTTPS and AF_UNIX for the host's resolver.
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+# systemd's baseline for ordinary services. A call outside it fails
+# with EPERM instead of killing the process. There is deliberately no
+# SystemCallArchitectures=native: on a 32-bit Raspberry Pi OS with a
+# 64-bit kernel it would block the armv7 binary's own syscalls.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target
