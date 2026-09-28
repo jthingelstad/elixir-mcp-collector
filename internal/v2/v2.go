@@ -22,6 +22,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -42,6 +44,9 @@ type Config struct {
 		MaxAttempts int `json:"max_attempts"`
 		TimeoutS    int `json:"timeout_s"`
 		BackoffMS   int `json:"backoff_ms"`
+		// Statuses the hub asks us to retry besides 5xx (429 since
+		// 2026-09-27). Absent - an older hub - means 5xx only.
+		RetryStatuses []int `json:"retry_statuses"`
 	} `json:"submit_retry"`
 	MinClientVersion string `json:"min_client_version"`
 	Gateway          struct {
@@ -173,17 +178,24 @@ func (c *Client) call(method, route string, body any, out any) (int, error) {
 }
 
 func (c *Client) callWithHTTP(client *http.Client, method, route string, body any, out any) (int, error) {
+	status, _, err := c.callWithHeaders(client, method, route, body, out)
+	return status, err
+}
+
+// callWithHeaders is callWithHTTP that also hands back the response
+// headers (nil when no response arrived): submit reads Retry-After.
+func (c *Client) callWithHeaders(client *http.Client, method, route string, body any, out any) (int, http.Header, error) {
 	var rd io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 		rd = bytes.NewReader(b)
 	}
 	req, err := http.NewRequest(method, c.Base+route, rd)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	req.Header.Set("authorization", "Bearer "+c.Token)
 	req.Header.Set("content-type", "application/json")
@@ -196,12 +208,12 @@ func (c *Client) callWithHTTP(client *http.Client, method, route string, body an
 	}
 	res, err := client.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	defer res.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(res.Body, maxDoorBytes+1))
 	if err != nil {
-		return res.StatusCode, err
+		return res.StatusCode, res.Header, err
 	}
 	// A response from the door - any status, any body, even one too
 	// large or malformed to use - is progress: the process is not
@@ -213,17 +225,17 @@ func (c *Client) callWithHTTP(client *http.Client, method, route string, body an
 	if raw, ok := out.(*rawBody); ok {
 		// Kept as sent, never judged: the caller decodes it if it cares.
 		*raw = data
-		return res.StatusCode, nil
+		return res.StatusCode, res.Header, nil
 	}
 	if len(data) > maxDoorBytes && out != nil {
-		return res.StatusCode, fmt.Errorf("%s %s: response over %d bytes", method, route, maxDoorBytes)
+		return res.StatusCode, res.Header, fmt.Errorf("%s %s: response over %d bytes", method, route, maxDoorBytes)
 	}
 	if out != nil && len(data) > 0 {
 		if err := json.Unmarshal(data, out); err != nil {
-			return res.StatusCode, err
+			return res.StatusCode, res.Header, err
 		}
 	}
-	return res.StatusCode, nil
+	return res.StatusCode, res.Header, nil
 }
 
 // rawBody, as callWithHTTP's out, takes the answer undecoded.
@@ -249,22 +261,62 @@ func (c *Client) submitWithRetry(submit map[string]any, out any) (int, error) {
 	for attempt := 1; attempt <= attempts; attempt++ {
 		client := *c.HTTP
 		client.Timeout = timeout
-		status, err := c.callWithHTTP(&client, "POST", "/submit", submit, out)
-		if err == nil && status < 500 {
+		status, header, err := c.callWithHeaders(&client, "POST", "/submit", submit, out)
+		if err == nil && status < 500 && !c.retryableSubmitStatus(status) {
 			return status, nil
 		}
 		if attempt == attempts {
 			return status, err
+		}
+		wait := backoff
+		if err == nil && status < 500 {
+			// A retryable 4xx (a 429 from the site API's throttle). One
+			// whose Retry-After is longer than the lease can wait - the
+			// door's hourly budget - is final: the lease expires either way.
+			if ra, ok := retryAfter(header); ok {
+				if ra > maxSubmitRetryAfter {
+					return status, nil
+				}
+				wait = max(wait, ra)
+			}
 		}
 		if err != nil {
 			c.Log("warn", fmt.Sprintf("submit transport failure; retrying same lease (%d/%d): %v", attempt, attempts, err))
 		} else {
 			c.Log("warn", fmt.Sprintf("submit refused HTTP %d; retrying same lease (%d/%d)", status, attempt, attempts))
 		}
-		c.Sleep(backoff)
+		c.Sleep(wait)
 		backoff *= 2
 	}
 	return 0, nil
+}
+
+// maxSubmitRetryAfter is the longest Retry-After a submit waits out
+// inside its 90-second lease, beside up to three 20-second attempts.
+const maxSubmitRetryAfter = 10 * time.Second
+
+// retryableSubmitStatus: a 4xx the hub's submit_retry.retry_statuses
+// names. Only 4xx: 5xx is always retried, and a success or a redirect
+// listed there by mistake must never re-send a submit.
+func (c *Client) retryableSubmitStatus(status int) bool {
+	if status < 400 || status >= 500 {
+		return false
+	}
+	return slices.Contains(c.cfg.SubmitRetry.RetryStatuses, status)
+}
+
+// retryAfter reads a Retry-After given in seconds (the door's form; an
+// HTTP-date or a missing header is no answer).
+func retryAfter(h http.Header) (time.Duration, bool) {
+	v := strings.TrimSpace(h.Get("Retry-After"))
+	if v == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return time.Duration(n) * time.Second, true
 }
 
 // LoadConfig fetches the launch-time contract and applies the update

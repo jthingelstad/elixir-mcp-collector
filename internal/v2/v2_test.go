@@ -722,6 +722,120 @@ func TestV2SubmitRetriesTransientServerFailureWithSameLease(t *testing.T) {
 	}
 }
 
+// submitRetryDoor is a door whose submit answers each status in turn
+// (then 200), with the Retry-After header given beside it, and whose
+// config serves retryStatuses as submit_retry.retry_statuses.
+func submitRetryDoor(t *testing.T, retryStatuses string, answers []int, retryAfter string) (*Client, *[]map[string]any, *[]time.Duration) {
+	t.Helper()
+	var submits []map[string]any
+	var slept []time.Duration
+	retry := ""
+	if retryStatuses != "" {
+		retry = `,"retry_statuses":` + retryStatuses
+	}
+	door := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/config"):
+			_, _ = w.Write([]byte(`{"pacing_ms":1,"breaker":{"threshold_403":5,"cooldown_s":1},
+				"overflow_bytes":250000,
+				"submit_retry":{"max_attempts":3,"timeout_s":20,"backoff_ms":500` + retry + `},
+				"min_client_version":"2.0.0","gateway":{"name":"t","channel":"bulk","status":"active"},"update":{}}`))
+		case strings.HasSuffix(r.URL.Path, "/lease"):
+			_, _ = w.Write([]byte(`{"job":{"endpoint":"player","entity_key":"#20JJJ2CCRU","lane":"bulk"},
+				"cr_path":"/players/%2320JJJ2CCRU","lease":"same-lease"}`))
+		case strings.HasSuffix(r.URL.Path, "/submit"):
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			submits = append(submits, body)
+			if n := len(submits); n <= len(answers) {
+				if retryAfter != "" {
+					w.Header().Set("Retry-After", retryAfter)
+				}
+				w.WriteHeader(answers[n-1])
+				_, _ = w.Write([]byte(`{"message":"Too Many Requests"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}
+	}))
+	t.Cleanup(door.Close)
+	c := &Client{
+		Base: door.URL, Token: "emcg_t", Version: "dev", HTTP: door.Client(),
+		Fetch: func(context.Context, string) crapi.Result {
+			return crapi.Result{Kind: "http", Status: 200, BodyText: `{}`}
+		},
+		Log: func(string, string) {}, Now: time.Now,
+		Sleep: func(d time.Duration) { slept = append(slept, d) },
+	}
+	if err := c.LoadConfig(false); err != nil {
+		t.Fatal(err)
+	}
+	return c, &submits, &slept
+}
+
+// A 429 from the site API's shared throttle is retried on the same lease
+// when the hub names it (review 2026-09-27 §6.6): before, the lease
+// expired unsubmitted and charged missed_streak toward quarantine.
+func TestV2SubmitRetriesThrottleTheHubNames(t *testing.T) {
+	c, submits, slept := submitRetryDoor(t, `[429]`, []int{429, 429}, "")
+	if _, err := c.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(*submits) != 3 {
+		t.Fatalf("two 429s then 200: want 3 submit calls, got %d", len(*submits))
+	}
+	if !reflect.DeepEqual((*submits)[0], (*submits)[2]) {
+		t.Fatalf("retry must preserve the exact lease payload")
+	}
+	want := []time.Duration{500 * time.Millisecond, time.Second}
+	if !reflect.DeepEqual(*slept, want) {
+		t.Fatalf("backoff: want %v, got %v", want, *slept)
+	}
+}
+
+// Without retry_statuses (an older hub) a 429 is final, as it always was.
+func TestV2Submit429IsFinalWhenTheHubNamesNoStatuses(t *testing.T) {
+	c, submits, _ := submitRetryDoor(t, "", []int{429}, "")
+	if _, err := c.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(*submits) != 1 {
+		t.Fatalf("want 1 submit call, got %d", len(*submits))
+	}
+}
+
+// A short Retry-After is waited out; one longer than the lease can wait
+// (the door's hourly budget) is final.
+func TestV2Submit429HonoursRetryAfter(t *testing.T) {
+	c, submits, slept := submitRetryDoor(t, `[429]`, []int{429}, "3")
+	if _, err := c.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(*submits) != 2 || !reflect.DeepEqual(*slept, []time.Duration{3 * time.Second}) {
+		t.Fatalf("Retry-After 3: want 2 calls after a 3s wait, got %d calls, slept %v", len(*submits), *slept)
+	}
+
+	c, submits, slept = submitRetryDoor(t, `[429]`, []int{429}, "1800")
+	if _, err := c.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(*submits) != 1 || len(*slept) != 0 {
+		t.Fatalf("Retry-After 1800: want 1 call and no wait, got %d calls, slept %v", len(*submits), *slept)
+	}
+}
+
+// Only a 4xx is taken from the list: a success named there by mistake
+// must never re-send a submit.
+func TestV2SubmitRetryStatusesIgnoreNon4xx(t *testing.T) {
+	c, submits, _ := submitRetryDoor(t, `[200, 409]`, nil, "")
+	if _, err := c.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(*submits) != 1 {
+		t.Fatalf("a 200 is final whatever the list says; got %d submit calls", len(*submits))
+	}
+}
+
 // A lease that carries filter.battles_after: the body submitted is the
 // API's array minus everything at or before the mark, with the counts
 // beside it; a lease without a filter submits the body verbatim and no
