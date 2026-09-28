@@ -527,8 +527,11 @@ is expected to update it when asked.
   counted as a lost fetch in the activity summary.
 - On a transport failure or server 5xx while submitting, it retries the
   same lease within the server-supplied retry budget, which stays inside
-  the lease's 90-second lifetime; a 4xx remains a refusal. A lease that
-  is never submitted expires and the job goes back to the queue.
+  the lease's 90-second lifetime. So does a 4xx the server lists in
+  `submit_retry.retry_statuses` (429, a momentarily full throttle),
+  unless its `Retry-After` is longer than the lease can wait; any other
+  4xx remains a refusal. A lease that is never submitted expires and the
+  job goes back to the queue.
 - When a lease carries a filter (a battlelog lease names the newest
   battle Elixir MCP already holds for that player), it drops the entries
   at or before it before submitting and reports how many it saw and
